@@ -237,11 +237,7 @@ export const useRosStore = create((set, get) => ({
         }
         const report = {
           reachable: true,
-          env: {
-            ROS_DOMAIN_ID: String(useAppStore.getState().runtimeProfile.network.rosDomainId || ''),
-            ROS_DISCOVERY_SERVER: useAppStore.getState().runtimeProfile.network.discoveryServer || '',
-            ROS_SUPER_CLIENT: useAppStore.getState().runtimeProfile.network.requiresSuperClient ? 'TRUE' : 'FALSE'
-          },
+          env: {},
           topics,
           topicTypes,
           services: [],

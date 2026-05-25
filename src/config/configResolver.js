@@ -25,30 +25,45 @@ function mergeInto(target, source) {
   return next
 }
 
+export function buildRobotDraft(robot = {}, deploymentProfile = null, robotPreset = null) {
+  return {
+    ...robot,
+    name: robot.name || robotPreset?.name || robot.host || 'unnamed-robot',
+    host: robot.host || '127.0.0.1',
+    port: robot.port || 9090,
+    deploymentProfileId: robot.deploymentProfileId || robotPreset?.deploymentProfileId || deploymentProfile?.id,
+    robotPresetId: robot.robotPresetId || robotPreset?.id,
+    environment: robot.environment || deploymentProfile?.environment,
+    localizationMode: robot.localizationMode || deploymentProfile?.localizationMode
+  }
+}
+
 export function resolveRobotConfig(robot = {}, userSettings = {}, autoDiscoveredSettings = {}) {
   const preset = getRobotPreset(robot.robotPresetId)
   const profile = getDeploymentProfile(robot.deploymentProfileId || preset?.deploymentProfileId)
+  const draftRobot = buildRobotDraft(robot, profile, preset)
   const effectiveConfig = deepMerge(
     DEFAULT_SETTINGS,
     profile?.defaults || {},
     preset?.defaults || {},
-    robot.settings || {},
+    draftRobot.settings || {},
     autoDiscoveredSettings || {},
     userSettings || {}
   )
 
   return {
+    robot: draftRobot,
     deploymentProfile: profile,
     robotPreset: preset,
     effectiveConfig,
     connection: {
-      host: robot.host || '127.0.0.1',
-      port: robot.port || 9090,
-      path: robot.path || profile?.network?.rosbridgePath || ''
+      host: draftRobot.host,
+      port: draftRobot.port,
+      path: draftRobot.path || profile?.network?.rosbridgePath || ''
     },
     metadata: {
-      environment: robot.environment || profile?.environment || 'real',
-      localizationMode: robot.localizationMode || profile?.localizationMode || 'odom'
+      environment: draftRobot.environment || profile?.environment || 'real',
+      localizationMode: draftRobot.localizationMode || profile?.localizationMode || 'odom'
     }
   }
 }

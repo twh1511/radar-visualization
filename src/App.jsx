@@ -23,11 +23,11 @@ function App() {
     showConnectionManager,
     showSettings,
     setShowConnectionManager,
-    settings,
+    effectiveConfig,
     connectionProfile
   } = useAppStore()
   const { connect, connected, connecting } = useRosStore()
-  const renderProfile = getRenderProfile(settings.performance.renderProfile)
+  const renderProfile = getRenderProfile(effectiveConfig.performance.renderProfile)
 
   useEffect(() => {
     if (showConnectionManager) return
@@ -57,7 +57,7 @@ function App() {
         <ambientLight intensity={0.6} />
         <directionalLight position={[10, 20, 10]} intensity={0.8} />
 
-        {settings.display.showGrid && (
+        {effectiveConfig.display.showGrid && (
           <Grid
             args={[100, 100]}
             cellSize={1}
@@ -72,7 +72,7 @@ function App() {
           />
         )}
 
-        {settings.display.showAxes && <axesHelper args={[1]} />}
+        {effectiveConfig.display.showAxes && <axesHelper args={[1]} />}
 
         <MapDisplay />
         <PointCloud />
@@ -87,11 +87,11 @@ function App() {
           makeDefault
         />
 
-        {(settings.display.showFPS || renderProfile.showStatsByDefault) && <Stats />}
+        {(effectiveConfig.display.showFPS || renderProfile.showStatsByDefault) && <Stats />}
       </Canvas>
 
       <TopicMonitor />
-      {settings.display.showNavigationControls && <NavigationControls />}
+      {effectiveConfig.display.showNavigationControls && <NavigationControls />}
       <NavigationGoalPanel />
 
       {showSettings && <SettingsPanel />}

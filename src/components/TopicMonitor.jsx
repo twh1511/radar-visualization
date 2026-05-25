@@ -3,14 +3,14 @@ import { useAppStore } from '../store/appStore'
 import { useRosStore } from '../store/rosStore'
 
 function TopicMonitor() {
-  const settings = useAppStore((s) => s.settings)
+  const effectiveConfig = useAppStore((s) => s.effectiveConfig)
   const runtimeProfile = useAppStore((s) => s.runtimeProfile)
   const topicStats = useAppStore((s) => s.topicStats)
   const mapData = useRosStore((s) => s.mapData)
   const mapStatus = useRosStore((s) => s.mapStatus)
   const diagnostics = useRosStore((s) => s.diagnostics)
   const navigationStatus = useRosStore((s) => s.navigationStatus)
-  const showMonitor = settings.display.showTopicMonitor
+  const showMonitor = effectiveConfig.display.showTopicMonitor
   const [, tick] = useState(0)
 
   useEffect(() => {
@@ -21,14 +21,14 @@ function TopicMonitor() {
   if (!showMonitor) return null
 
   const topics = [
-    { label: '点云', name: settings.topics.pointCloud },
-    { label: '位姿', name: settings.topics.pose, detail: diagnostics.poseSource?.mode ? `${diagnostics.poseSource.mode} / ${diagnostics.poseSource.frameId || '-'}` : null },
-    { label: '地图', name: settings.topics.map, detail: mapStatus !== '未加载' ? mapStatus : null, isMap: true },
-    { label: '全局路径', name: settings.topics.globalPlan },
-    { label: '局部路径', name: settings.topics.localPlan },
-    { label: '全局代价地图', name: settings.topics.globalCostmap },
-    { label: '局部代价地图', name: settings.topics.localCostmap },
-    { label: '定位健康', name: settings.topics.localizationHealth, detail: diagnostics.localizationHealthValue || null }
+    { label: '点云', name: effectiveConfig.topics.pointCloud },
+    { label: '位姿', name: effectiveConfig.topics.pose, detail: diagnostics.poseSource?.mode ? `${diagnostics.poseSource.mode} / ${diagnostics.poseSource.frameId || '-'}` : null },
+    { label: '地图', name: effectiveConfig.topics.map, detail: mapStatus !== '未加载' ? mapStatus : null, isMap: true },
+    { label: '全局路径', name: effectiveConfig.topics.globalPlan },
+    { label: '局部路径', name: effectiveConfig.topics.localPlan },
+    { label: '全局代价地图', name: effectiveConfig.topics.globalCostmap },
+    { label: '局部代价地图', name: effectiveConfig.topics.localCostmap },
+    { label: '定位健康', name: effectiveConfig.topics.localizationHealth, detail: diagnostics.localizationHealthValue || null }
   ]
 
   return (

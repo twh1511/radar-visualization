@@ -6,9 +6,9 @@ import * as THREE from 'three'
 
 function PointCloud() {
   const pointCloudData = useRosStore((s) => s.pointCloudData)
-  const pointSize = useAppStore((s) => s.settings.performance.pointSize)
-  const colorByHeight = useAppStore((s) => s.settings.display.colorByHeight)
-  const renderProfileId = useAppStore((s) => s.settings.performance.renderProfile)
+  const pointSize = useAppStore((s) => s.effectiveConfig.performance.pointSize)
+  const colorByHeight = useAppStore((s) => s.effectiveConfig.display.colorByHeight)
+  const renderProfileId = useAppStore((s) => s.effectiveConfig.performance.renderProfile)
   const renderProfile = getRenderProfile(renderProfileId)
 
   const geometry = useMemo(() => new THREE.BufferGeometry(), [])

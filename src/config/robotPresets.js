@@ -30,16 +30,28 @@ export const ROBOT_PRESETS = [
     description: '针对 IIRI 集群 HDL 实机导航链路的预设。',
     defaults: {
       topics: {
-        pointCloud: '/cloud_registered',
+        // FAST-LIO 的 /cloud_registered 在实机默认被 scan_publish_en:false 关闭，
+        // 实际持续发布的是 livox 原始点云 /points2，故默认用它。
+        pointCloud: '/points2',
         pose: '/hdl_localization/odom',
         map: '/map',
         globalPlan: '/plan',
         localPlan: '/local_plan',
         localizationHealth: '/localization_health'
+      },
+      // 该实机链路确实发布全局/局部代价地图，预设里直接开启订阅与显示，
+      // 避免依赖部署档案而漏订阅（订阅受 capabilities.supportsCostmap 门控）。
+      capabilities: {
+        supportsCostmap: true,
+        supportsLocalizationHealth: true
+      },
+      display: {
+        showGlobalCostmap: true,
+        showLocalCostmap: true
       }
     },
     discoveryCandidates: {
-      pointCloud: ['/cloud_registered', '/points2', '/livox/lidar'],
+      pointCloud: ['/points2', '/cloud_registered', '/livox/lidar'],
       pose: ['/hdl_localization/odom', '/odom'],
       map: ['/map'],
       globalPlan: ['/plan', '/path'],

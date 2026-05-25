@@ -3,7 +3,7 @@ import { useRosStore } from '../store/rosStore'
 import { useAppStore } from '../store/appStore'
 
 function NavigationControls() {
-  const settings = useAppStore((s) => s.settings)
+  const actions = useAppStore((s) => s.effectiveConfig.actions)
   const capabilities = useAppStore((s) => s.effectiveConfig.capabilities)
   const navigationTask = useRosStore((s) => s.navigationTask)
   const navigationStatus = useRosStore((s) => s.navigationStatus)
@@ -26,7 +26,7 @@ function NavigationControls() {
         <button style={btnStyle} onClick={() => callNavigationService('clearLocalCostmap')}>清局部代价地图</button>
       </div>
       <div style={hintStyle}>
-        当前 action: {settings.actions.navigateToPose}
+        当前 action: {actions.navigateToPose}
       </div>
     </div>
   )

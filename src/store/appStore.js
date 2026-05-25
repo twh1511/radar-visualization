@@ -5,7 +5,7 @@ import { DEPLOYMENT_PROFILES } from '../config/deploymentProfiles'
 import { ROBOT_PRESETS } from '../config/robotPresets'
 import { resolveRobotConfig } from '../config/configResolver'
 
-const SETTINGS_VERSION = 5
+const SETTINGS_VERSION = 7
 
 const DEFAULT_ROBOT = {
   id: 'default',
@@ -29,6 +29,7 @@ function resolveState(state) {
   const currentRobot = robots.find((robot) => robot.id === currentRobotId) || robots[0] || null
   const currentRobotDiscovery = state.discoveredSettingsByRobotId?.[currentRobotId] || {}
   const currentDiscoveryReport = state.discoveryReportsByRobotId?.[currentRobotId] || null
+  const currentDeployStatus = state.deployStatusByRobotId?.[currentRobotId] || null
   const resolved = resolveRobotConfig(currentRobot, state.settings, currentRobotDiscovery)
 
   return {
@@ -37,7 +38,7 @@ function resolveState(state) {
     currentRobotId,
     deploymentProfiles: DEPLOYMENT_PROFILES,
     robotPresets: ROBOT_PRESETS,
-    currentRobot,
+    currentRobot: resolved.robot,
     effectiveConfig: resolved.effectiveConfig,
     connectionProfile: resolved.connection,
     runtimeProfile: {
@@ -49,7 +50,8 @@ function resolveState(state) {
       localizationMode: resolved.metadata.localizationMode,
       network: resolved.deploymentProfile?.network || {},
       autoDiscoveredTopics: currentRobotDiscovery.topics || {},
-      discoveryReport: currentDiscoveryReport
+      discoveryReport: currentDiscoveryReport,
+      deployStatus: currentDeployStatus
     }
   }
 }
@@ -61,10 +63,13 @@ export const useAppStore = create(
       currentRobotId: null,
       showSettings: false,
       showConnectionManager: true,
-      settings: clone(DEFAULT_SETTINGS),
+      // 仅存放用户显式覆盖（稀疏）。完整生效配置由 resolveRobotConfig 合并
+      // DEFAULT_SETTINGS→部署档案→机器人预设→自动识别→本层 得到 effectiveConfig。
+      settings: {},
       topicStats: {},
       discoveredSettingsByRobotId: {},
       discoveryReportsByRobotId: {},
+      deployStatusByRobotId: {},
 
       addRobot: (robot) => {
         const id = robot.id || Date.now().toString()
@@ -137,6 +142,8 @@ export const useAppStore = create(
           const keys = path.split('.')
           let obj = newSettings
           for (let i = 0; i < keys.length - 1; i++) {
+            // settings 是稀疏的，按需创建中间层级
+            if (obj[keys[i]] == null || typeof obj[keys[i]] !== 'object') obj[keys[i]] = {}
             obj = obj[keys[i]]
           }
           obj[keys[keys.length - 1]] = value
@@ -144,7 +151,7 @@ export const useAppStore = create(
         })
       },
 
-      resetSettings: () => set((state) => resolveState({ ...state, settings: clone(DEFAULT_SETTINGS) })),
+      resetSettings: () => set((state) => resolveState({ ...state, settings: {} })),
 
       applyDeploymentProfile: (profileId) => {
         set((state) => {
@@ -198,7 +205,22 @@ export const useAppStore = create(
           discoveryReportsByRobotId: {
             ...state.discoveryReportsByRobotId,
             [robotId]: {
+              source: report?.source || state.discoveryReportsByRobotId?.[robotId]?.source || 'browser-rosapi',
+              envSource: report?.envSource || state.discoveryReportsByRobotId?.[robotId]?.envSource || 'unknown',
               ...report,
+              updatedAt: Date.now()
+            }
+          }
+        }))
+      },
+
+      setDeployStatus: (robotId, status) => {
+        set((state) => resolveState({
+          ...state,
+          deployStatusByRobotId: {
+            ...state.deployStatusByRobotId,
+            [robotId]: {
+              ...status,
               updatedAt: Date.now()
             }
           }
@@ -252,7 +274,9 @@ export const useAppStore = create(
               ...robot,
               settings: clone(robot.settings || {})
             })) : [DEFAULT_ROBOT],
-            settings: clone(DEFAULT_SETTINGS),
+            // 旧版本里 settings 是完整 DEFAULT_SETTINGS 克隆（会覆盖档案/预设/识别）；
+            // 新模型改为稀疏，迁移时清空，让 effectiveConfig 重新按合并链生效。
+            settings: {},
             discoveredSettingsByRobotId: persistedState?.discoveredSettingsByRobotId || {},
             _settingsVersion: SETTINGS_VERSION
           }
@@ -264,7 +288,7 @@ export const useAppStore = create(
             ...robot,
             settings: clone(robot.settings || {})
           })) || [DEFAULT_ROBOT],
-          settings: clone(persistedState.settings || DEFAULT_SETTINGS),
+          settings: persistedState.settings ? clone(persistedState.settings) : {},
           discoveredSettingsByRobotId: persistedState.discoveredSettingsByRobotId || {},
           _settingsVersion: SETTINGS_VERSION
         }

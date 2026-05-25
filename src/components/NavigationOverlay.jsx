@@ -6,7 +6,7 @@ import CostmapLayer from './CostmapLayer'
 import { transformPointToTarget } from '../utils/transforms'
 
 function NavigationOverlay() {
-  const settings = useAppStore((s) => s.settings)
+  const effectiveConfig = useAppStore((s) => s.effectiveConfig)
   const globalPlan = useRosStore((s) => s.globalPlan)
   const localPlan = useRosStore((s) => s.localPlan)
   const lookaheadPoint = useRosStore((s) => s.lookaheadPoint)
@@ -42,16 +42,16 @@ function NavigationOverlay() {
 
   return (
     <>
-      {settings.display.showGlobalCostmap && globalCostmap && (
+      {effectiveConfig.display.showGlobalCostmap && globalCostmap && (
         <CostmapLayer data={globalCostmap} frame={globalCostmapFrame} opacity={0.18} occupiedColor={[239, 68, 68]} />
       )}
-      {settings.display.showLocalCostmap && localCostmap && (
+      {effectiveConfig.display.showLocalCostmap && localCostmap && (
         <CostmapLayer data={localCostmap} frame={localCostmapFrame} opacity={0.28} occupiedColor={[245, 158, 11]} />
       )}
-      {settings.display.showGlobalPlan && globalPlan?.poses?.length > 1 && (
+      {effectiveConfig.display.showGlobalPlan && globalPlan?.poses?.length > 1 && (
         <PathLine message={globalPlan} color="#22c55e" lineWidth={3} />
       )}
-      {settings.display.showLocalPlan && localPlan?.poses?.length > 1 && (
+      {effectiveConfig.display.showLocalPlan && localPlan?.poses?.length > 1 && (
         <PathLine message={localPlan} color="#f59e0b" lineWidth={2} />
       )}
       {lookaheadPosition && (

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { useAppStore } from '../store/appStore'
 import { useRosStore } from '../store/rosStore'
 import { buildDeployManifest, buildDeployManifestYaml } from '../config/deployManifest'
+import { resolveRobotConfig } from '../config/configResolver'
 
 function ConnectionManager() {
   const {
@@ -12,19 +13,24 @@ function ConnectionManager() {
     runtimeProfile,
     currentRobot,
     effectiveConfig,
+    settings,
+    discoveryReportsByRobotId,
+    discoveredSettingsByRobotId,
     addRobot,
     removeRobot,
     updateRobot,
     setCurrentRobot,
     setShowConnectionManager,
     getCurrentDeploymentProfile,
-    applyRobotPreset
+    setDeployStatus,
+    setDiscoveryReport
   } = useAppStore()
 
   const { connect, connecting, connectionStatus, errorMessage, diagnostics, autoDiscoverResources } = useRosStore()
   const discoveryInProgress = useRosStore((s) => s._discoveryInProgress)
   const discoveryStatus = useRosStore((s) => s._discoveryStatus)
   const discoveryError = useRosStore((s) => s._discoveryError)
+
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [showDeployPreview, setShowDeployPreview] = useState(false)
   const [name, setName] = useState('')
@@ -33,6 +39,10 @@ function ConnectionManager() {
   const [selectedId, setSelectedId] = useState(currentRobotId)
   const [deploymentProfileId, setDeploymentProfileId] = useState(getCurrentDeploymentProfile()?.id || deploymentProfiles[0]?.id)
   const [robotPresetId, setRobotPresetId] = useState(runtimeProfile.robotPresetId || robotPresets[0]?.id)
+  const [deployArtifact, setDeployArtifact] = useState(null)
+  const [deployFeedback, setDeployFeedback] = useState(null)
+  const [deploymentProfileTouched, setDeploymentProfileTouched] = useState(false)
+  const [deployDiscoveryInput, setDeployDiscoveryInput] = useState('')
 
   useEffect(() => {
     if (selectedId) {
@@ -43,20 +53,20 @@ function ConnectionManager() {
         setPort(String(robot.port))
         setDeploymentProfileId(robot.deploymentProfileId || deploymentProfiles[0]?.id)
         setRobotPresetId(robot.robotPresetId || robotPresets[0]?.id)
+        setDeploymentProfileTouched(false)
       }
     }
   }, [selectedId, savedRobots, deploymentProfiles, robotPresets])
 
   const selectedProfile = deploymentProfiles.find((profile) => profile.id === deploymentProfileId) || deploymentProfiles[0]
   const selectedPreset = robotPresets.find((preset) => preset.id === robotPresetId) || robotPresets[0]
-
-  const detectedCount = Object.values(runtimeProfile.autoDiscoveredTopics || {}).filter(Boolean).length
-  const detectionState = detectedCount >= 3 ? '已识别主链路' : detectedCount > 0 ? '部分识别' : '未识别'
-  const detectionColor = detectedCount >= 3 ? '#22c55e' : detectedCount > 0 ? '#f59e0b' : '#9ca3af'
-  const discoveryReport = runtimeProfile.discoveryReport
+  const draftRobotId = selectedId || currentRobot?.id || 'draft'
+  const discoveryReport = discoveryReportsByRobotId?.[draftRobotId] || runtimeProfile.discoveryReport || null
+  const autoDiscoveredSettings = discoveredSettingsByRobotId?.[draftRobotId] || {}
 
   const draftRobot = {
     ...(currentRobot || {}),
+    id: draftRobotId,
     name: name || selectedPreset?.name || host,
     host,
     port: parseInt(port, 10) || 9090,
@@ -65,8 +75,29 @@ function ConnectionManager() {
     environment: selectedProfile?.environment,
     localizationMode: selectedProfile?.localizationMode
   }
-  const deployManifest = buildDeployManifest({ robot: draftRobot, runtimeProfile, effectiveConfig })
-  const deployManifestYaml = buildDeployManifestYaml({ robot: draftRobot, runtimeProfile, effectiveConfig })
+
+  const resolvedDraft = resolveRobotConfig(draftRobot, settings, autoDiscoveredSettings)
+  const deployRuntimeProfile = {
+    ...runtimeProfile,
+    deploymentProfileId: resolvedDraft.robot.deploymentProfileId,
+    deploymentProfileName: resolvedDraft.deploymentProfile?.name || selectedProfile?.name,
+    robotPresetId: resolvedDraft.robot.robotPresetId,
+    robotPresetName: resolvedDraft.robotPreset?.name || selectedPreset?.name,
+    environment: resolvedDraft.metadata.environment,
+    localizationMode: resolvedDraft.metadata.localizationMode,
+    network: resolvedDraft.deploymentProfile?.network || {},
+    autoDiscoveredTopics: autoDiscoveredSettings.topics || {},
+    discoveryReport,
+    deployStatus: runtimeProfile.deployStatus
+  }
+
+  const detectedCount = Object.values(deployRuntimeProfile.autoDiscoveredTopics || {}).filter(Boolean).length
+  const detectionState = detectedCount >= 3 ? '已识别主链路' : detectedCount > 0 ? '部分识别' : '未识别'
+  const detectionColor = detectedCount >= 3 ? '#22c55e' : detectedCount > 0 ? '#f59e0b' : '#9ca3af'
+  const deployStatus = deployFeedback || deployRuntimeProfile.deployStatus
+  const canGenerateManifest = Boolean(resolvedDraft.robot.host)
+  const canExportManifest = Boolean(deployArtifact?.yaml)
+  const envDetectedFromDeploy = discoveryReport?.envSource === 'deploy-ssh' || discoveryReport?.source === 'deploy-ssh'
 
   const handleConnect = () => {
     if (!host) return
@@ -125,14 +156,121 @@ function ConnectionManager() {
     }
   }
 
+  const handleImportDeployDiscovery = () => {
+    if (!deployDiscoveryInput.trim()) {
+      setDeployFeedback({
+        action: 'import-deploy-discovery',
+        status: 'error',
+        message: '请先粘贴 deploy/scripts/discover-robot.py 生成的 JSON 报告。'
+      })
+      return
+    }
+
+    try {
+      const report = JSON.parse(deployDiscoveryInput)
+      setDiscoveryReport(draftRobotId, {
+        ...report,
+        source: 'deploy-ssh',
+        envSource: 'deploy-ssh'
+      })
+      setDeployFeedback({
+        action: 'import-deploy-discovery',
+        status: 'success',
+        message: '已导入 deploy 探测结果，后续清单将优先使用真实 env。'
+      })
+    } catch (error) {
+      setDeployFeedback({
+        action: 'import-deploy-discovery',
+        status: 'error',
+        message: 'deploy 探测结果不是合法 JSON，请重新粘贴。'
+      })
+    }
+  }
+
+  const handleGenerateManifest = () => {
+    try {
+      const manifest = buildDeployManifest({
+        robot: resolvedDraft.robot,
+        runtimeProfile: deployRuntimeProfile,
+        effectiveConfig: resolvedDraft.effectiveConfig
+      })
+      const yaml = buildDeployManifestYaml({
+        robot: resolvedDraft.robot,
+        runtimeProfile: deployRuntimeProfile,
+        effectiveConfig: resolvedDraft.effectiveConfig
+      })
+      const message = envDetectedFromDeploy
+        ? '已根据当前模板、deploy 探测结果和自动识别结果生成部署清单。'
+        : discoveryReport?.updatedAt
+          ? '已根据当前模板、部署档案和自动识别结果生成部署清单。env 未探测部分仍使用部署档案默认值。'
+          : '已根据当前模板和部署档案生成部署清单；未识别部分使用模板默认值。'
+
+      const status = {
+        action: 'generate-manifest',
+        status: 'success',
+        message,
+        generatedAt: Date.now(),
+        fileName: `${manifest.robotName || 'robot'}-deploy-manifest.yaml`
+      }
+
+      setDeployArtifact({ manifest, yaml, status })
+      setDeployFeedback(status)
+      setShowDeployPreview(true)
+      setDeployStatus(draftRobotId, status)
+    } catch (error) {
+      const status = {
+        action: 'generate-manifest',
+        status: 'error',
+        message: error.message || '生成部署清单失败，请检查当前配置。'
+      }
+      setDeployArtifact(null)
+      setDeployFeedback(status)
+      setDeployStatus(draftRobotId, status)
+    }
+  }
+
+  const handleDeployToRobot = () => {
+    const status = {
+      action: 'deploy',
+      status: 'pending',
+      message: '已准备部署，请使用下方命令在本地执行部署。'
+    }
+    setDeployFeedback(status)
+    setDeployStatus(draftRobotId, status)
+  }
+
+  const handleRestartRobotServices = () => {
+    const status = {
+      action: 'restart',
+      status: 'pending',
+      message: '重启动作需要在部署后通过 deploy 脚本或机器人侧 systemctl 执行。'
+    }
+    setDeployFeedback(status)
+    setDeployStatus(draftRobotId, status)
+  }
+
   const handleExportManifest = () => {
-    const blob = new Blob([deployManifestYaml], { type: 'text/yaml' })
+    if (!deployArtifact?.yaml) return
+    const blob = new Blob([deployArtifact.yaml], { type: 'text/yaml' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
+    const fileName = deployArtifact.status?.fileName || `${deployArtifact.manifest.robotName || 'robot'}-deploy-manifest.yaml`
     a.href = url
-    a.download = `${deployManifest.robotName || 'robot'}-deploy-manifest.yaml`
+    a.download = fileName
+    document.body.appendChild(a)
     a.click()
+    document.body.removeChild(a)
     URL.revokeObjectURL(url)
+
+    const status = {
+      action: 'export-manifest',
+      status: 'success',
+      message: `YAML 已开始下载：${fileName}`,
+      generatedAt: deployArtifact.status?.generatedAt,
+      fileName
+    }
+    setDeployFeedback(status)
+    setDeployStatus(draftRobotId, status)
   }
 
   const handleNew = () => {
@@ -140,8 +278,12 @@ function ConnectionManager() {
     setName('')
     setHost('')
     setPort('9090')
+    setDeploymentProfileTouched(false)
     setDeploymentProfileId(deploymentProfiles[0]?.id)
     setRobotPresetId(robotPresets[0]?.id)
+    setDeployArtifact(null)
+    setDeployFeedback(null)
+    setDeployDiscoveryInput('')
   }
 
   const handleDelete = (id) => {
@@ -201,8 +343,12 @@ function ConnectionManager() {
                 style={inputStyle}
                 value={robotPresetId}
                 onChange={(e) => {
-                  setRobotPresetId(e.target.value)
-                  applyRobotPreset(e.target.value)
+                  const nextPresetId = e.target.value
+                  const nextPreset = robotPresets.find((preset) => preset.id === nextPresetId) || robotPresets[0]
+                  setRobotPresetId(nextPresetId)
+                  if (!deploymentProfileTouched && nextPreset?.deploymentProfileId) {
+                    setDeploymentProfileId(nextPreset.deploymentProfileId)
+                  }
                 }}
               >
                 {robotPresets.map((preset) => (
@@ -228,7 +374,7 @@ function ConnectionManager() {
               <input style={inputStyle} value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.1.247" />
             </div>
 
-            <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
+            <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
               <button
                 onClick={handleConnect}
                 disabled={!host || connecting}
@@ -240,18 +386,55 @@ function ConnectionManager() {
               >
                 {connecting ? '连接中...' : '连接并自动识别'}
               </button>
-              <button
-                type="button"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => autoDiscoverResources()}
-                style={smallBtnStyle}
-                disabled={discoveryInProgress}
-              >
-                {discoveryInProgress ? '识别中...' : '立即执行识别'}
-              </button>
               <button onClick={() => setShowAdvanced((value) => !value)} style={btnStyle}>
                 {showAdvanced ? '收起高级项' : '高级项'}
               </button>
+            </div>
+
+            <div style={deployPanelStyle}>
+              <div style={deployTitleStyle}>部署操作区</div>
+              <div style={deployButtonGridStyle}>
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => autoDiscoverResources()}
+                  style={deployPrimaryButtonStyle}
+                  disabled={discoveryInProgress}
+                >
+                  {discoveryInProgress ? '识别中...' : '立即执行识别'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleGenerateManifest}
+                  style={{
+                    ...deployActionButtonStyle,
+                    opacity: canGenerateManifest ? 1 : 0.5,
+                    cursor: canGenerateManifest ? 'pointer' : 'not-allowed'
+                  }}
+                  disabled={!canGenerateManifest}
+                >
+                  生成部署清单
+                </button>
+                <button type="button" onClick={handleDeployToRobot} style={deployActionButtonStyle}>
+                  部署到机器人
+                </button>
+                <button type="button" onClick={handleRestartRobotServices} style={deployActionButtonStyle}>
+                  重启机器人服务
+                </button>
+              </div>
+              <div style={deployResultBoxStyle}>
+                <div style={deployResultLabelStyle}>识别状态：<span style={{ color: detectionColor }}>{detectionState}</span></div>
+                <div style={deployResultLabelStyle}>当前 deploy 目标：<code>{resolvedDraft.robot.name}@{resolvedDraft.robot.host || '未填写 IP'}</code></div>
+                <div style={deployResultLabelStyle}>部署清单状态：{deployStatus?.action === 'generate-manifest' || deployStatus?.action === 'export-manifest' ? deployStatus.message : '尚未生成'}</div>
+                <div style={deployResultLabelStyle}>最近一次部署结果：{deployStatus?.action === 'deploy' ? deployStatus.message : '暂无'}</div>
+                <div style={deployResultLabelStyle}>最近一次重启结果：{deployStatus?.action === 'restart' ? deployStatus.message : '暂无'}</div>
+                <div style={deployResultLabelStyle}>最近一次执行时间：{deployStatus?.updatedAt ? new Date(deployStatus.updatedAt).toLocaleString() : deployStatus?.generatedAt ? new Date(deployStatus.generatedAt).toLocaleString() : '暂无'}</div>
+                {discoveryReport?.recommendations && Object.keys(discoveryReport.recommendations).length > 0 && (
+                  <div style={{ ...deployResultLabelStyle, color: '#93c5fd' }}>
+                    推荐覆盖：{Object.entries(discoveryReport.recommendations).map(([k, v]) => `${k}=${v}`).join(', ')}
+                  </div>
+                )}
+              </div>
             </div>
 
             {(connecting || errorMessage) && (
@@ -287,10 +470,10 @@ function ConnectionManager() {
 
             <div style={diagnosticCardStyle}>
               <div style={{ fontWeight: 600, color: '#aaa', marginBottom: 6 }}>自动识别结果</div>
-              <ResourceRow label="位姿源" value={runtimeProfile.autoDiscoveredTopics.pose} fallback={selectedPreset?.defaults?.topics?.pose || selectedProfile?.defaults?.topics?.pose} />
-              <ResourceRow label="点云源" value={runtimeProfile.autoDiscoveredTopics.pointCloud} fallback={selectedPreset?.defaults?.topics?.pointCloud || selectedProfile?.defaults?.topics?.pointCloud} />
-              <ResourceRow label="地图源" value={runtimeProfile.autoDiscoveredTopics.map} fallback={selectedPreset?.defaults?.topics?.map || selectedProfile?.defaults?.topics?.map} />
-              <ResourceRow label="路径源" value={runtimeProfile.autoDiscoveredTopics.globalPlan} fallback={selectedPreset?.defaults?.topics?.globalPlan || selectedProfile?.defaults?.topics?.globalPlan} />
+              <ResourceRow label="位姿源" value={deployRuntimeProfile.autoDiscoveredTopics.pose} fallback={selectedPreset?.defaults?.topics?.pose || selectedProfile?.defaults?.topics?.pose} />
+              <ResourceRow label="点云源" value={deployRuntimeProfile.autoDiscoveredTopics.pointCloud} fallback={selectedPreset?.defaults?.topics?.pointCloud || selectedProfile?.defaults?.topics?.pointCloud} />
+              <ResourceRow label="地图源" value={deployRuntimeProfile.autoDiscoveredTopics.map} fallback={selectedPreset?.defaults?.topics?.map || selectedProfile?.defaults?.topics?.map} />
+              <ResourceRow label="路径源" value={deployRuntimeProfile.autoDiscoveredTopics.globalPlan} fallback={selectedPreset?.defaults?.topics?.globalPlan || selectedProfile?.defaults?.topics?.globalPlan} />
               <div style={{ marginTop: 8, fontSize: 11, color: '#6b7280' }}>
                 如果这里显示“使用模板默认值”，说明该资源尚未自动识别到，但仍会按模板尝试连接。
               </div>
@@ -298,18 +481,38 @@ function ConnectionManager() {
 
             <div style={diagnosticCardStyle}>
               <div style={{ fontWeight: 600, color: '#aaa', marginBottom: 6 }}>Discovery 结果</div>
+              <div style={{ marginBottom: 8, fontSize: 11, color: '#9ca3af' }}>
+                {envDetectedFromDeploy ? '下列网络环境变量来自 deploy 探测结果。' : '下列网络环境变量尚未真实探测，当前使用部署档案默认值。'}
+              </div>
               <div style={profileMetaStyle}>可达性：{discoveryReport?.reachable ? '可达' : '未执行或不可达'}</div>
-              <div style={profileMetaStyle}>识别 ROS_DOMAIN_ID：{discoveryReport?.env?.ROS_DOMAIN_ID || '未知'}</div>
-              <div style={profileMetaStyle}>识别 DISCOVERY_SERVER：{discoveryReport?.env?.ROS_DISCOVERY_SERVER || '未知'}</div>
-              <div style={profileMetaStyle}>识别 ROS_SUPER_CLIENT：{discoveryReport?.env?.ROS_SUPER_CLIENT || '未知'}</div>
+              <div style={profileMetaStyle}>ROS_DOMAIN_ID（{envDetectedFromDeploy ? 'deploy 探测' : '部署档案'}）：{discoveryReport?.env?.ROS_DOMAIN_ID || deployRuntimeProfile.network.rosDomainId || '未知'}</div>
+              <div style={profileMetaStyle}>ROS_DISCOVERY_SERVER（{envDetectedFromDeploy ? 'deploy 探测' : '部署档案'}）：{discoveryReport?.env?.ROS_DISCOVERY_SERVER || deployRuntimeProfile.network.discoveryServer || '未知'}</div>
+              <div style={profileMetaStyle}>ROS_SUPER_CLIENT（{envDetectedFromDeploy ? 'deploy 探测' : '部署档案'}）：{discoveryReport?.env?.ROS_SUPER_CLIENT || (deployRuntimeProfile.network.requiresSuperClient ? 'TRUE' : 'FALSE')}</div>
               <div style={profileMetaStyle}>识别到 topics 数量：{discoveryReport?.topics?.length || 0}</div>
               <div style={profileMetaStyle}>识别到 services 数量：{discoveryReport?.services?.length || 0}</div>
               <div style={profileMetaStyle}>识别到 actions 数量：{discoveryReport?.actions?.length || 0}</div>
-              {discoveryReport?.recommendations && Object.keys(discoveryReport.recommendations).length > 0 && (
-                <div style={{ marginTop: 8, fontSize: 11, color: '#93c5fd' }}>
-                  推荐覆盖：{Object.entries(discoveryReport.recommendations).map(([k, v]) => `${k}=${v}`).join(', ')}
-                </div>
-              )}
+            </div>
+
+            <div style={diagnosticCardStyle}>
+              <div style={{ fontWeight: 600, color: '#aaa', marginBottom: 6 }}>导入 deploy 探测结果</div>
+              <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 8 }}>
+                将 `deploy/scripts/discover-robot.py` 生成的 JSON 报告粘贴到这里，清单会优先使用真实 env。
+              </div>
+              <textarea
+                style={{
+                  ...inputStyle,
+                  minHeight: 120,
+                  resize: 'vertical',
+                  whiteSpace: 'pre',
+                  lineHeight: 1.4
+                }}
+                value={deployDiscoveryInput}
+                onChange={(e) => setDeployDiscoveryInput(e.target.value)}
+                placeholder='{"env":{"ROS_DOMAIN_ID":"219","ROS_DISCOVERY_SERVER":"192.168.1.247:11811"},"topics":[...],"recommendations":{...}}'
+              />
+              <button onClick={handleImportDeployDiscovery} style={{ ...btnStyle, marginTop: 10 }}>
+                导入 deploy 探测 JSON
+              </button>
             </div>
 
             <div style={diagnosticCardStyle}>
@@ -319,11 +522,22 @@ function ConnectionManager() {
                   <button onClick={() => setShowDeployPreview((value) => !value)} style={smallBtnStyle}>
                     {showDeployPreview ? '收起预览' : '预览 YAML'}
                   </button>
-                  <button onClick={handleExportManifest} style={smallBtnStyle}>导出 YAML</button>
+                  <button
+                    onClick={handleExportManifest}
+                    style={{
+                      ...smallBtnStyle,
+                      opacity: canExportManifest ? 1 : 0.5,
+                      cursor: canExportManifest ? 'pointer' : 'not-allowed'
+                    }}
+                    disabled={!canExportManifest}
+                  >导出 YAML</button>
                 </div>
               </div>
               <div style={{ fontSize: 11, color: '#93c5fd' }}>
-                当前 UI 中选择的模板、IP、部署档案和自动发现结果，已经可以直接生成 deploy 目录兼容的 YAML 清单。
+                当前清单基于：表单草稿 + 自动识别结果。若已导入 deploy 探测 JSON，则 env 将优先使用真实探测值。
+              </div>
+              <div style={{ ...deployResultLabelStyle, marginTop: 8, color: deployStatus?.status === 'error' ? '#fca5a5' : '#cbd5e1' }}>
+                {deployStatus?.message || '请先点击“生成部署清单”，再预览或导出 YAML。'}
               </div>
               <div style={commandHintStyle}>
                 <div style={{ color: '#d1d5db', fontSize: 12, marginBottom: 6 }}>下一步</div>
@@ -333,10 +547,15 @@ function ConnectionManager() {
                 <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 6 }}>
                   2. 在项目根目录执行下面的命令
                 </div>
-                <pre style={commandPreviewStyle}>{`bash deploy/scripts/deploy.sh deploy/manifests/${deployManifest.robotName || 'your-robot'}-deploy-manifest.yaml`}</pre>
+                <pre style={commandPreviewStyle}>{`bash deploy/scripts/deploy.sh deploy/manifests/${(deployArtifact?.manifest?.robotName || resolvedDraft.robot.name || 'your-robot')}-deploy-manifest.yaml`}</pre>
               </div>
-              {showDeployPreview && (
-                <pre style={manifestPreviewStyle}>{deployManifestYaml}</pre>
+              {showDeployPreview && deployArtifact?.yaml && (
+                <pre style={manifestPreviewStyle}>{deployArtifact.yaml}</pre>
+              )}
+              {showDeployPreview && !deployArtifact?.yaml && (
+                <div style={{ marginTop: 12, fontSize: 12, color: '#9ca3af' }}>
+                  尚未生成 YAML，请先点击“生成部署清单”。
+                </div>
               )}
             </div>
 
@@ -345,7 +564,14 @@ function ConnectionManager() {
                 <div style={sectionTitleStyle}>高级配置</div>
                 <div style={fieldStyle}>
                   <label style={labelStyle}>部署档案</label>
-                  <select style={inputStyle} value={deploymentProfileId} onChange={(e) => setDeploymentProfileId(e.target.value)}>
+                  <select
+                    style={inputStyle}
+                    value={deploymentProfileId}
+                    onChange={(e) => {
+                      setDeploymentProfileTouched(true)
+                      setDeploymentProfileId(e.target.value)
+                    }}
+                  >
                     {deploymentProfiles.map((profile) => (
                       <option key={profile.id} value={profile.id}>{profile.name}</option>
                     ))}
@@ -404,9 +630,12 @@ const modalStyle = {
   borderRadius: 12,
   width: 860,
   maxWidth: '94vw',
+  maxHeight: '92vh',
   border: '1px solid #2a2a2a',
   boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
-  overflow: 'hidden'
+  overflow: 'hidden',
+  display: 'flex',
+  flexDirection: 'column'
 }
 const headerStyle = {
   padding: '20px 24px',
@@ -415,7 +644,9 @@ const headerStyle = {
 }
 const contentStyle = {
   display: 'flex',
-  padding: 20
+  padding: 20,
+  overflowY: 'auto',
+  minHeight: 0
 }
 const sectionTitleStyle = {
   fontSize: 13,
@@ -497,6 +728,55 @@ const profileCardStyle = {
   background: '#111827',
   borderRadius: 8,
   border: '1px solid #1f2937'
+}
+const deployPanelStyle = {
+  marginTop: 16,
+  padding: 14,
+  background: '#0f172a',
+  borderRadius: 10,
+  border: '1px solid #1d4ed8'
+}
+const deployTitleStyle = {
+  fontSize: 13,
+  fontWeight: 700,
+  color: '#e5e7eb',
+  marginBottom: 10
+}
+const deployButtonGridStyle = {
+  display: 'grid',
+  gridTemplateColumns: '1fr 1fr',
+  gap: 8
+}
+const deployPrimaryButtonStyle = {
+  padding: '10px 12px',
+  background: '#2563eb',
+  color: 'white',
+  border: '1px solid #3b82f6',
+  borderRadius: 8,
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: 'pointer'
+}
+const deployActionButtonStyle = {
+  padding: '10px 12px',
+  background: '#1f2937',
+  color: 'white',
+  border: '1px solid #374151',
+  borderRadius: 8,
+  fontSize: 12,
+  cursor: 'pointer'
+}
+const deployResultBoxStyle = {
+  marginTop: 12,
+  padding: 12,
+  background: '#111827',
+  borderRadius: 8,
+  border: '1px solid #1f2937'
+}
+const deployResultLabelStyle = {
+  fontSize: 12,
+  color: '#cbd5e1',
+  marginTop: 4
 }
 const detectionBannerStyle = {
   marginTop: 12,

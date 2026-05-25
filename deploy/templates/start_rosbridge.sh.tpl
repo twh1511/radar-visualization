@@ -2,13 +2,17 @@
 set -e
 
 BASE_DIR="{{BASE_DIR}}/{{APP_DIR_NAME}}"
-ENV_FILE="$BASE_DIR/rosbridge.env"
+ENV_FILE="$BASE_DIR/config/rosbridge.env"
 
 if [ -f "$ENV_FILE" ]; then
   set -a
   source "$ENV_FILE"
   set +a
 fi
+
+# systemd 以 root 运行时环境可能无 HOME，rcl 日志初始化需要可写目录
+export HOME="${HOME:-/root}"
+mkdir -p "${ROS_LOG_DIR:-$HOME/.ros/log}"
 
 source /opt/ros/humble/setup.bash
 
