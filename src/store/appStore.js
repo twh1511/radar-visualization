@@ -1,105 +1,218 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { DEFAULT_SETTINGS } from '../config/defaultSettings'
+import { DEPLOYMENT_PROFILES } from '../config/deploymentProfiles'
+import { ROBOT_PRESETS } from '../config/robotPresets'
+import { resolveRobotConfig } from '../config/configResolver'
 
-const SETTINGS_VERSION = 3  // 每次默认配置改动时递增
+const SETTINGS_VERSION = 5
 
-const DEFAULT_SETTINGS = {
-  topics: {
-    pointCloud: '/points2',
-    pointCloudType: 'sensor_msgs/msg/PointCloud2',
-    pose: '/odom',
-    poseType: 'nav_msgs/msg/Odometry',
-    map: '/map',
-    mapType: 'nav_msgs/msg/OccupancyGrid'
-  },
-  performance: {
-    downsample: 5,
-    pointCloudThrottle: 100,
-    poseThrottle: 50,
-    pointSize: 0.05
-  },
-  display: {
-    showGrid: true,
-    showAxes: true,
-    showFPS: false,
-    showTopicMonitor: true,
-    colorByHeight: true
+const DEFAULT_ROBOT = {
+  id: 'default',
+  name: '机器狗 Alpha',
+  host: '192.168.1.247',
+  port: 9090,
+  deploymentProfileId: 'generic-rosbridge',
+  robotPresetId: 'generic-radar-viz',
+  environment: 'real',
+  localizationMode: 'odom',
+  settings: {}
+}
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value))
+}
+
+function resolveState(state) {
+  const robots = state.savedRobots?.length ? state.savedRobots : [DEFAULT_ROBOT]
+  const currentRobotId = state.currentRobotId || robots[0]?.id || null
+  const currentRobot = robots.find((robot) => robot.id === currentRobotId) || robots[0] || null
+  const currentRobotDiscovery = state.discoveredSettingsByRobotId?.[currentRobotId] || {}
+  const currentDiscoveryReport = state.discoveryReportsByRobotId?.[currentRobotId] || null
+  const resolved = resolveRobotConfig(currentRobot, state.settings, currentRobotDiscovery)
+
+  return {
+    ...state,
+    savedRobots: robots,
+    currentRobotId,
+    deploymentProfiles: DEPLOYMENT_PROFILES,
+    robotPresets: ROBOT_PRESETS,
+    currentRobot,
+    effectiveConfig: resolved.effectiveConfig,
+    connectionProfile: resolved.connection,
+    runtimeProfile: {
+      deploymentProfileId: currentRobot?.deploymentProfileId || DEPLOYMENT_PROFILES[0].id,
+      deploymentProfileName: resolved.deploymentProfile?.name || DEPLOYMENT_PROFILES[0].name,
+      robotPresetId: currentRobot?.robotPresetId || ROBOT_PRESETS[0].id,
+      robotPresetName: resolved.robotPreset?.name || ROBOT_PRESETS[0].name,
+      environment: resolved.metadata.environment,
+      localizationMode: resolved.metadata.localizationMode,
+      network: resolved.deploymentProfile?.network || {},
+      autoDiscoveredTopics: currentRobotDiscovery.topics || {},
+      discoveryReport: currentDiscoveryReport
+    }
   }
 }
 
 export const useAppStore = create(
   persist(
-    (set, get) => ({
-      // 已保存的机器人列表
-      savedRobots: [
-        { id: 'default', name: '机器狗 Alpha', host: '192.168.1.247', port: 9090 }
-      ],
-
-      // 当前选中的机器人
+    (set, get) => resolveState({
+      savedRobots: [DEFAULT_ROBOT],
       currentRobotId: null,
-
-      // UI 状态（不持久化通过 partialize 控制）
       showSettings: false,
       showConnectionManager: true,
-
-      // 设置
-      settings: DEFAULT_SETTINGS,
-
-      // 话题统计（运行时，不持久化）
+      settings: clone(DEFAULT_SETTINGS),
       topicStats: {},
+      discoveredSettingsByRobotId: {},
+      discoveryReportsByRobotId: {},
 
-      // ========== Actions ==========
       addRobot: (robot) => {
         const id = robot.id || Date.now().toString()
-        set((state) => ({
-          savedRobots: [...state.savedRobots.filter(r => r.id !== id), { ...robot, id }]
+        set((state) => resolveState({
+          ...state,
+          savedRobots: [
+            ...state.savedRobots.filter((item) => item.id !== id),
+            {
+              ...DEFAULT_ROBOT,
+              ...robot,
+              id,
+              settings: clone(robot.settings || {})
+            }
+          ]
         }))
         return id
       },
 
       updateRobot: (id, updates) => {
-        set((state) => ({
-          savedRobots: state.savedRobots.map(r =>
-            r.id === id ? { ...r, ...updates } : r
+        set((state) => resolveState({
+          ...state,
+          savedRobots: state.savedRobots.map((robot) =>
+            robot.id === id
+              ? {
+                  ...robot,
+                  ...updates,
+                  settings: updates.settings ? clone(updates.settings) : robot.settings
+                }
+              : robot
           )
         }))
       },
 
       removeRobot: (id) => {
-        set((state) => ({
-          savedRobots: state.savedRobots.filter(r => r.id !== id),
-          currentRobotId: state.currentRobotId === id ? null : state.currentRobotId
-        }))
+        set((state) => {
+          const nextDiscovered = { ...state.discoveredSettingsByRobotId }
+          delete nextDiscovered[id]
+          return resolveState({
+            ...state,
+            savedRobots: state.savedRobots.filter((robot) => robot.id !== id),
+            currentRobotId: state.currentRobotId === id ? null : state.currentRobotId,
+            discoveredSettingsByRobotId: nextDiscovered
+          })
+        })
       },
 
-      setCurrentRobot: (id) => set({ currentRobotId: id }),
+      setCurrentRobot: (id) => set((state) => resolveState({ ...state, currentRobotId: id })),
 
-      getCurrentRobot: () => {
-        const { savedRobots, currentRobotId } = get()
-        return savedRobots.find(r => r.id === currentRobotId) || null
+      getCurrentRobot: () => get().currentRobot,
+
+      getCurrentDeploymentProfile: () => {
+        const { deploymentProfiles, runtimeProfile } = get()
+        return deploymentProfiles.find((profile) => profile.id === runtimeProfile.deploymentProfileId) || deploymentProfiles[0]
       },
 
-      // UI
+      getCurrentRobotPreset: () => {
+        const { robotPresets, runtimeProfile } = get()
+        return robotPresets.find((preset) => preset.id === runtimeProfile.robotPresetId) || robotPresets[0]
+      },
+
       toggleSettings: () => set((state) => ({ showSettings: !state.showSettings })),
-      setShowConnectionManager: (show) => set({ showConnectionManager: show }),
+      setShowConnectionManager: (show) => set((state) => ({
+        showConnectionManager: show,
+        showSettings: show ? false : state.showSettings
+      })),
 
-      // 设置更新
       updateSettings: (path, value) => {
         set((state) => {
-          const newSettings = JSON.parse(JSON.stringify(state.settings))
+          const newSettings = clone(state.settings)
           const keys = path.split('.')
           let obj = newSettings
           for (let i = 0; i < keys.length - 1; i++) {
             obj = obj[keys[i]]
           }
           obj[keys[keys.length - 1]] = value
-          return { settings: newSettings }
+          return resolveState({ ...state, settings: newSettings })
         })
       },
 
-      resetSettings: () => set({ settings: DEFAULT_SETTINGS }),
+      resetSettings: () => set((state) => resolveState({ ...state, settings: clone(DEFAULT_SETTINGS) })),
 
-      // 话题统计
+      applyDeploymentProfile: (profileId) => {
+        set((state) => {
+          const currentRobotId = state.currentRobotId || state.savedRobots[0]?.id
+          return resolveState({
+            ...state,
+            savedRobots: state.savedRobots.map((robot) =>
+              robot.id === currentRobotId
+                ? {
+                    ...robot,
+                    deploymentProfileId: profileId,
+                    settings: {}
+                  }
+                : robot
+            )
+          })
+        })
+      },
+
+      applyRobotPreset: (presetId) => {
+        set((state) => {
+          const currentRobotId = state.currentRobotId || state.savedRobots[0]?.id
+          return resolveState({
+            ...state,
+            savedRobots: state.savedRobots.map((robot) =>
+              robot.id === currentRobotId
+                ? {
+                    ...robot,
+                    robotPresetId: presetId,
+                    settings: {}
+                  }
+                : robot
+            )
+          })
+        })
+      },
+
+      setAutoDiscoveredSettings: (robotId, discoveredSettings) => {
+        set((state) => resolveState({
+          ...state,
+          discoveredSettingsByRobotId: {
+            ...state.discoveredSettingsByRobotId,
+            [robotId]: discoveredSettings
+          }
+        }))
+      },
+
+      setDiscoveryReport: (robotId, report) => {
+        set((state) => resolveState({
+          ...state,
+          discoveryReportsByRobotId: {
+            ...state.discoveryReportsByRobotId,
+            [robotId]: {
+              ...report,
+              updatedAt: Date.now()
+            }
+          }
+        }))
+      },
+
+      clearAutoDiscoveredSettings: (robotId) => {
+        set((state) => {
+          const nextDiscovered = { ...state.discoveredSettingsByRobotId }
+          delete nextDiscovered[robotId]
+          return resolveState({ ...state, discoveredSettingsByRobotId: nextDiscovered })
+        })
+      },
+
       recordTopicMessage: (topicName) => {
         const now = Date.now()
         set((state) => {
@@ -126,19 +239,35 @@ export const useAppStore = create(
         savedRobots: state.savedRobots,
         currentRobotId: state.currentRobotId,
         settings: state.settings,
+        discoveredSettingsByRobotId: state.discoveredSettingsByRobotId,
         _settingsVersion: SETTINGS_VERSION
       }),
-      // 版本不匹配时强制重置 settings 到新默认值
       migrate: (persistedState, version) => {
         if (!persistedState || version !== SETTINGS_VERSION) {
           console.log('[AppStore] 设置版本变更，重置为新默认值')
           return {
             ...persistedState,
-            settings: DEFAULT_SETTINGS,
+            savedRobots: persistedState?.savedRobots?.length ? persistedState.savedRobots.map((robot) => ({
+              ...DEFAULT_ROBOT,
+              ...robot,
+              settings: clone(robot.settings || {})
+            })) : [DEFAULT_ROBOT],
+            settings: clone(DEFAULT_SETTINGS),
+            discoveredSettingsByRobotId: persistedState?.discoveredSettingsByRobotId || {},
             _settingsVersion: SETTINGS_VERSION
           }
         }
-        return persistedState
+        return {
+          ...persistedState,
+          savedRobots: persistedState.savedRobots?.map((robot) => ({
+            ...DEFAULT_ROBOT,
+            ...robot,
+            settings: clone(robot.settings || {})
+          })) || [DEFAULT_ROBOT],
+          settings: clone(persistedState.settings || DEFAULT_SETTINGS),
+          discoveredSettingsByRobotId: persistedState.discoveredSettingsByRobotId || {},
+          _settingsVersion: SETTINGS_VERSION
+        }
       }
     }
   )

@@ -3,7 +3,7 @@ import { useAppStore } from '../store/appStore'
 import { useRosStore } from '../store/rosStore'
 
 function TopBar() {
-  const { getCurrentRobot, setShowConnectionManager, toggleSettings } = useAppStore()
+  const { getCurrentRobot, runtimeProfile, setShowConnectionManager, toggleSettings } = useAppStore()
   const { connected, connecting, connectionStatus, disconnect } = useRosStore()
   const robot = getCurrentRobot()
 
@@ -12,7 +12,13 @@ function TopBar() {
   return (
     <div style={barStyle}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <button onClick={() => setShowConnectionManager(true)} style={iconBtnStyle} title="切换机器人">
+        <button
+          type="button"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => setShowConnectionManager(true)}
+          style={iconBtnStyle}
+          title="切换机器人"
+        >
           ☰
         </button>
         <div style={{ fontWeight: 600, fontSize: 14 }}>ROS2 可视化</div>
@@ -20,6 +26,9 @@ function TopBar() {
         <div style={{ fontSize: 13 }}>
           {robot ? robot.name : '未选择机器人'}
           {robot && <span style={{ color: '#666', marginLeft: 8, fontSize: 11 }}>{robot.host}:{robot.port}</span>}
+        </div>
+        <div style={{ color: '#666', fontSize: 11 }}>
+          {runtimeProfile.deploymentProfileName} / {runtimeProfile.localizationMode}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 8 }}>
           <div style={{ width: 8, height: 8, borderRadius: '50%', background: statusColor }} />

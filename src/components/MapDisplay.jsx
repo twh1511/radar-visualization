@@ -1,13 +1,14 @@
-import React, { useMemo } from 'react'
+import React, { useMemo, useCallback } from 'react'
 import { useRosStore } from '../store/rosStore'
 import * as THREE from 'three'
-import { transformPoseToTarget, rosPositionToThree, rosQuaternionToThree } from '../utils/transforms'
+import { transformPoseToTarget } from '../utils/transforms'
 
 function MapDisplay() {
   const mapData = useRosStore((s) => s.mapData)
   const mapFrame = useRosStore((s) => s.mapFrame)
   const targetFrame = useRosStore((s) => s.targetFrame)
   const tfTree = useRosStore((s) => s.tfTree)
+  const setNavigationGoal = useRosStore((s) => s.setNavigationGoal)
 
   const mapMesh = useMemo(() => {
     if (!mapData || !mapData.info) return null
@@ -26,8 +27,6 @@ function MapDisplay() {
       console.warn('[MapDisplay] map data is empty', mapData)
       return null
     }
-
-    console.log(`[MapDisplay] 渲染地图 ${width}x${height} resolution=${resolution} dataLen=${data.length}`)
 
     const canvas = document.createElement('canvas')
     canvas.width = width
@@ -66,7 +65,6 @@ function MapDisplay() {
     texture.minFilter = THREE.LinearFilter
     texture.needsUpdate = true
 
-    // 地图 origin 是地图左下角在 map frame 中的位姿
     const originPose = {
       x: origin.position.x,
       y: origin.position.y,
@@ -77,39 +75,73 @@ function MapDisplay() {
       qw: origin.orientation?.w || 1
     }
 
-    // 地图中心在地图局部坐标系中的偏移（未旋转）
     const localCenterX = width * resolution / 2
     const localCenterY = height * resolution / 2
-
-    // 将局部中心偏移应用 origin 的旋转
-    const originQuat = new THREE.Quaternion(
-      originPose.qx, originPose.qy, originPose.qz, originPose.qw
-    )
+    const originQuat = new THREE.Quaternion(originPose.qx, originPose.qy, originPose.qz, originPose.qw)
     const localCenter = new THREE.Vector3(localCenterX, localCenterY, 0)
     localCenter.applyQuaternion(originQuat)
-
-    // 地图中心在 map frame 中的位置
-    const centerInMapFrame = {
-      x: originPose.x + localCenter.x,
-      y: originPose.y + localCenter.y,
-      z: originPose.z + localCenter.z,
-      qx: originPose.qx,
-      qy: originPose.qy,
-      qz: originPose.qz,
-      qw: originPose.qw
-    }
 
     return {
       texture,
       width: width * resolution,
       height: height * resolution,
-      centerPose: centerInMapFrame
+      resolution,
+      rawData: data,
+      gridWidth: width,
+      gridHeight: height,
+      originPose,
+      centerPose: {
+        x: originPose.x + localCenter.x,
+        y: originPose.y + localCenter.y,
+        z: originPose.z + localCenter.z,
+        qx: originPose.qx,
+        qy: originPose.qy,
+        qz: originPose.qz,
+        qw: originPose.qw
+      }
     }
   }, [mapData])
 
+  const classifyPoint = (gridX, gridY) => {
+    const ix = Math.floor(gridX / mapMesh.resolution)
+    const iy = Math.floor(gridY / mapMesh.resolution)
+    if (ix < 0 || iy < 0 || ix >= mapMesh.gridWidth || iy >= mapMesh.gridHeight) {
+      return { level: 'invalid', message: '超出地图范围', occupancy: null }
+    }
+    const index = iy * mapMesh.gridWidth + ix
+    const occupancy = mapMesh.rawData[index]
+    if (occupancy === -1) return { level: 'unknown', message: '落在未知区域', occupancy }
+    if (occupancy >= 50) return { level: 'blocked', message: '落在障碍区域', occupancy }
+    return { level: 'free', message: '落在自由区域', occupancy }
+  }
+
+  const handleMapClick = useCallback((event) => {
+    if (!mapMesh) return
+    event.stopPropagation()
+    const point = event.point
+    const local = event.object.worldToLocal(point.clone())
+    const mapX = local.x + mapMesh.width / 2
+    const mapY = local.z + mapMesh.height / 2
+    const validity = classifyPoint(mapX, mapY)
+
+    const goal = {
+      target_pose: {
+        header: { frame_id: mapFrame || targetFrame },
+        pose: {
+          position: {
+            x: mapMesh.originPose.x + mapX,
+            y: mapMesh.originPose.y + mapY,
+            z: 0
+          },
+          orientation: { x: 0, y: 0, z: 0, w: 1 }
+        }
+      }
+    }
+    setNavigationGoal(goal, validity)
+  }, [mapMesh, mapFrame, targetFrame, setNavigationGoal])
+
   if (!mapMesh) return null
 
-  // 将地图中心位姿从 mapFrame 变换到 targetFrame，再转 Three.js 坐标
   const { position, quaternion } = transformPoseToTarget(
     mapMesh.centerPose,
     mapFrame,
@@ -117,13 +149,12 @@ function MapDisplay() {
     tfTree
   )
 
-  // 地图平面在 Three.js 中是 XZ 平面，需要绕 X 轴旋转 -90°
   const finalQuat = quaternion.clone().multiply(
     new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2)
   )
 
   return (
-    <mesh position={position} quaternion={finalQuat}>
+    <mesh position={position} quaternion={finalQuat} onClick={handleMapClick}>
       <planeGeometry args={[mapMesh.width, mapMesh.height]} />
       <meshBasicMaterial map={mapMesh.texture} transparent />
     </mesh>

@@ -1,0 +1,44 @@
+robotName: example-orin
+host: 192.168.1.247
+user: wl
+sshPort: 22
+platform: qr_orin
+
+deploymentProfileId: iiri-cluster-hdl
+robotPresetId: iiri-hdl-cluster
+
+paths:
+  baseDir: /home/wl/autorun
+  appDirName: radar-visualization
+  releaseDir: /home/wl/autorun/radar-visualization/releases/current
+  currentLink: /home/wl/autorun/radar-visualization/current
+
+rosbridge:
+  enabled: true
+  launchMode: ros2_launch
+  package: rosbridge_server
+  launchOrExecutable: rosbridge_websocket_launch.xml
+  port: 9090
+  address: 0.0.0.0
+  serviceName: radar-visualization-rosbridge.service
+  startCommand: ros2 launch rosbridge_server rosbridge_websocket_launch.xml
+
+ds:
+  enabled: true
+  entry: /home/wl/autorun/iiri-ros/start_ros2_iiri_start.sh
+  rosbridgeUrl: ws://127.0.0.1:9090
+  serviceName: radar-visualization-ds.service
+  startCommand: /home/wl/autorun/iiri-ros/start_ros2_iiri_start.sh
+
+env:
+  ROS_DOMAIN_ID: 219
+  RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+  ROS_DISCOVERY_SERVER: 192.168.1.247:11811
+  ROS_SUPER_CLIENT: TRUE
+  FASTDDS_BUILTIN_TRANSPORTS: DEFAULT
+
+checks:
+  tcpPortOpen: 9090
+  expectedServiceMode: systemd
+  rosbridgeServiceName: radar-visualization-rosbridge.service
+  dsServiceName: radar-visualization-ds.service
