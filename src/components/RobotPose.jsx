@@ -1,95 +1,79 @@
-import React, { useRef } from 'react'
+import React, { useRef, useState, useEffect } from 'react'
 import { useFrame } from '@react-three/fiber'
 import { useRosStore } from '../store/rosStore'
 import * as THREE from 'three'
+import { LoadingManager } from 'three'
+import URDFLoader from 'urdf-loader'
+import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { transformPoseToTarget } from '../utils/transforms'
 
-// 简化的机器狗模型（在本地坐标系中: x 前, y 上, z 右；与已应用的 ROS→Three 变换后的姿态一致）
-function DogModel() {
-  const bodyColor = '#2563eb'
-  const legColor = '#1e293b'
-  const headColor = '#3b82f6'
-  const accentColor = '#ef4444'
+const URDF_URL = '/robot_model/urdf/mz05_20260322.urdf'
 
-  // 机身尺寸
-  const bodyLen = 0.55   // x 方向（前后）
-  const bodyWid = 0.28   // z 方向（左右）
-  const bodyHei = 0.18   // y 方向（上下）
-  const legHei = 0.22
-  const legR = 0.035
-  const standY = legHei  // 机身底面距地面的高度
+// 加载真实 URDF 模型（mz05 四足）。STL 无颜色，统一上金属质感材质。
+function useUrdfRobot() {
+  const [data, setData] = useState({ robot: null, offsetY: 0 })
+  useEffect(() => {
+    let cancelled = false
+    let robotResult = null
+    const manager = new LoadingManager()
+    const loader = new URDFLoader(manager)
+    // 显式用 STLLoader 加载网格并上色（URDF 里材质都是白色，覆盖掉）
+    loader.loadMeshCb = (path, mgr, done) => {
+      new STLLoader(mgr).load(
+        path,
+        (geometry) => {
+          geometry.computeVertexNormals()
+          const mesh = new THREE.Mesh(
+            geometry,
+            new THREE.MeshStandardMaterial({ color: '#3a4a66', metalness: 0.55, roughness: 0.45 })
+          )
+          mesh.castShadow = true
+          done(mesh)
+        },
+        undefined,
+        (err) => done(null, err)
+      )
+    }
+    // onComplete 只拿到 URDF 结构，STL 网格是异步加载的；必须等
+    // manager.onLoad（全部网格就绪）后再算包围盒，否则 box 为空、offsetY 失效。
+    loader.load(URDF_URL, (result) => { robotResult = result })
+    manager.onLoad = () => {
+      if (cancelled || !robotResult) return
+      // base 原点在机身，直接放脚会陷到地下。按场景朝向(z上→y上)算最低点，抬高使脚踩 y=0。
+      robotResult.rotation.set(-Math.PI / 2, 0, 0)
+      robotResult.updateMatrixWorld(true)
+      const box = new THREE.Box3().setFromObject(robotResult)
+      robotResult.rotation.set(0, 0, 0)
+      robotResult.updateMatrixWorld(true)
+      const offsetY = Number.isFinite(box.min.y) ? -box.min.y : 0
+      setData({ robot: robotResult, offsetY })
+    }
+    return () => { cancelled = true }
+  }, [])
+  return data
+}
 
-  // 腿的四个位置（机身底面四角）
-  const legOffX = bodyLen / 2 - 0.06
-  const legOffZ = bodyWid / 2 - 0.02
-  const legY = standY - legHei / 2  // 腿中心 y
+// 简化兜底模型（URDF 加载完成前显示）
+function FallbackModel() {
+  const bodyLen = 0.55, bodyWid = 0.28, bodyHei = 0.18, legHei = 0.22, legR = 0.035
+  const standY = legHei
+  const legOffX = bodyLen / 2 - 0.06, legOffZ = bodyWid / 2 - 0.02, legY = standY - legHei / 2
   const legs = [
-    [ legOffX, legY,  legOffZ],
-    [ legOffX, legY, -legOffZ],
-    [-legOffX, legY,  legOffZ],
-    [-legOffX, legY, -legOffZ],
+    [legOffX, legY, legOffZ], [legOffX, legY, -legOffZ],
+    [-legOffX, legY, legOffZ], [-legOffX, legY, -legOffZ]
   ]
-
   return (
     <group>
-      {/* 机身 */}
-      <mesh position={[0, standY + bodyHei / 2, 0]} castShadow>
+      <mesh position={[0, standY + bodyHei / 2, 0]}>
         <boxGeometry args={[bodyLen, bodyHei, bodyWid]} />
-        <meshStandardMaterial color={bodyColor} metalness={0.4} roughness={0.5} />
+        <meshStandardMaterial color="#2563eb" metalness={0.4} roughness={0.5} opacity={0.6} transparent />
       </mesh>
-
-      {/* 机身顶部传感器盒 */}
-      <mesh position={[0.05, standY + bodyHei + 0.04, 0]}>
-        <boxGeometry args={[0.18, 0.06, 0.18]} />
-        <meshStandardMaterial color="#0f172a" metalness={0.6} roughness={0.3} />
-      </mesh>
-
-      {/* 头部 */}
-      <mesh position={[bodyLen / 2 + 0.04, standY + bodyHei - 0.02, 0]}>
-        <boxGeometry args={[0.18, 0.16, 0.2]} />
-        <meshStandardMaterial color={headColor} metalness={0.4} roughness={0.5} />
-      </mesh>
-
-      {/* 眼睛 */}
-      <mesh position={[bodyLen / 2 + 0.13, standY + bodyHei + 0.02, 0.06]}>
-        <sphereGeometry args={[0.022, 12, 12]} />
-        <meshStandardMaterial color="#fde047" emissive="#fde047" emissiveIntensity={0.5} />
-      </mesh>
-      <mesh position={[bodyLen / 2 + 0.13, standY + bodyHei + 0.02, -0.06]}>
-        <sphereGeometry args={[0.022, 12, 12]} />
-        <meshStandardMaterial color="#fde047" emissive="#fde047" emissiveIntensity={0.5} />
-      </mesh>
-
-      {/* 前向指示锥 (朝 ROS x+ 即模型本地 x+) */}
-      <mesh position={[bodyLen / 2 + 0.18, standY + bodyHei + 0.02, 0]} rotation={[0, 0, -Math.PI / 2]}>
-        <coneGeometry args={[0.05, 0.12, 16]} />
-        <meshStandardMaterial color={accentColor} />
-      </mesh>
-
-      {/* 尾巴 */}
-      <mesh position={[-bodyLen / 2 - 0.06, standY + bodyHei, 0]} rotation={[0, 0, Math.PI / 4]}>
-        <cylinderGeometry args={[0.015, 0.025, 0.15, 8]} />
-        <meshStandardMaterial color={bodyColor} />
-      </mesh>
-
-      {/* 四条腿 */}
       {legs.map((p, i) => (
         <mesh key={i} position={p}>
           <cylinderGeometry args={[legR, legR * 1.2, legHei, 12]} />
-          <meshStandardMaterial color={legColor} metalness={0.5} roughness={0.4} />
+          <meshStandardMaterial color="#1e293b" opacity={0.6} transparent />
         </mesh>
       ))}
-
-      {/* 四个脚掌 */}
-      {legs.map((p, i) => (
-        <mesh key={`f${i}`} position={[p[0], 0.012, p[2]]}>
-          <sphereGeometry args={[legR * 1.4, 12, 8]} />
-          <meshStandardMaterial color="#0f172a" />
-        </mesh>
-      ))}
-
-      {/* 坐标轴辅助（可视化朝向） */}
-      <primitive object={new THREE.AxesHelper(0.4)} />
     </group>
   )
 }
@@ -100,6 +84,7 @@ function RobotPose() {
   const robotPoseFrame = useRosStore((s) => s.robotPoseFrame)
   const targetFrame = useRosStore((s) => s.targetFrame)
   const tfTree = useRosStore((s) => s.tfTree)
+  const { robot, offsetY } = useUrdfRobot()
 
   useFrame(() => {
     if (groupRef.current) {
@@ -116,7 +101,16 @@ function RobotPose() {
 
   return (
     <group ref={groupRef}>
-      <DogModel />
+      {robot ? (
+        // offsetY 把脚抬到地面(y=0)；内层绕 X 轴 -90° 把 URDF(z上) 转到场景(y上)
+        <group position={[0, offsetY, 0]}>
+          <group rotation={[-Math.PI / 2, 0, 0]}>
+            <primitive object={robot} />
+          </group>
+        </group>
+      ) : (
+        <FallbackModel />
+      )}
     </group>
   )
 }
