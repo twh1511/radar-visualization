@@ -34,6 +34,7 @@ PY
 }
 
 ROSBRIDGE_SERVICE="$(read_manifest rosbridge.serviceName radar-visualization-rosbridge.service)"
+WATCHER_SERVICE="$(read_manifest rosbridge.watcher.serviceName radar-visualization-rosbridge-watcher.service)"
 DS_SERVICE="$(read_manifest ds.serviceName radar-visualization-ds.service)"
 DS_ENABLED="$(read_manifest ds.enabled false)"
 
@@ -56,6 +57,16 @@ else
   _sudo rm -f "/etc/systemd/system/$DS_SERVICE"
 fi
 
+# rosbridge 自动重启守护：本轮渲染了就安装，否则清理残留
+if [ -f "$TARGET_DIR/systemd/$WATCHER_SERVICE" ]; then
+  _sudo cp "$TARGET_DIR/systemd/$WATCHER_SERVICE" /etc/systemd/system/
+  _sudo systemctl enable "$WATCHER_SERVICE" >/dev/null 2>&1 || true
+else
+  _sudo systemctl stop "$WATCHER_SERVICE" >/dev/null 2>&1 || true
+  _sudo systemctl disable "$WATCHER_SERVICE" >/dev/null 2>&1 || true
+  _sudo rm -f "/etc/systemd/system/$WATCHER_SERVICE"
+fi
+
 _sudo systemctl daemon-reload
 _sudo systemctl enable "$ROSBRIDGE_SERVICE" >/dev/null 2>&1 || true
 
@@ -64,6 +75,12 @@ _sudo systemctl restart "$ROSBRIDGE_SERVICE"
 if [ "$DS_ENABLED" = "true" ] || [ "$DS_ENABLED" = "True" ]; then
   _sudo systemctl restart "$DS_SERVICE" || true
 fi
+if [ -f "$TARGET_DIR/systemd/$WATCHER_SERVICE" ]; then
+  _sudo systemctl restart "$WATCHER_SERVICE" || true
+fi
 sleep 2
 echo "remote_install: prepared $TARGET_DIR"
 echo "rosbridge service: $ROSBRIDGE_SERVICE -> $(systemctl is-active "$ROSBRIDGE_SERVICE" 2>/dev/null || echo unknown)"
+if [ -f "/etc/systemd/system/$WATCHER_SERVICE" ]; then
+  echo "watcher service: $WATCHER_SERVICE -> $(systemctl is-active "$WATCHER_SERVICE" 2>/dev/null || echo unknown)"
+fi

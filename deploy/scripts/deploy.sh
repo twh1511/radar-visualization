@@ -75,6 +75,10 @@ lines = {
     'ROSBRIDGE_PING_TIMEOUT': str(float(rosbridge.get('websocketPingTimeout', 30))),
     'ROSBRIDGE_UNREGISTER_TIMEOUT': str(float(rosbridge.get('unregisterTimeout', 2))),
     'ROSBRIDGE_MAX_MESSAGE_SIZE': str(int(rosbridge.get('maxMessageSize', 10000000))),
+    'WATCHER_ENABLED': 'true' if (rosbridge.get('watcher') or {}).get('enabled') else 'false',
+    'WATCHER_SERVICE_NAME': (rosbridge.get('watcher') or {}).get('serviceName', 'radar-visualization-rosbridge-watcher.service'),
+    'ROS_STACK_CONTAINER': (rosbridge.get('watcher') or {}).get('containerName', 'i-ros'),
+    'WATCHER_SETTLE_SECONDS': str((rosbridge.get('watcher') or {}).get('settleSeconds', 10)),
     'DS_ENTRY': ds['entry'],
     'DS_ROSBRIDGE_URL': ds['rosbridgeUrl'],
     'DS_SERVICE_NAME': ds.get('serviceName', checks.get('dsServiceName', 'radar-visualization-ds.service')),
@@ -130,6 +134,14 @@ render_template "$DEPLOY_ROOT/templates/rosbridge.env.tpl" "$WORK_DIR/rendered/c
 render_template "$DEPLOY_ROOT/templates/start_rosbridge.sh.tpl" "$WORK_DIR/rendered/bin/start_rosbridge.sh"
 render_template "$DEPLOY_ROOT/templates/rosbridge.service.tpl" "$WORK_DIR/rendered/systemd/$ROSBRIDGE_SERVICE_NAME"
 chmod +x "$WORK_DIR/rendered/bin/start_rosbridge.sh"
+
+# rosbridge 自动重启守护：监听 ROS 栈容器重启，自动重启 rosbridge 重连新 publisher
+if [ "${WATCHER_ENABLED:-false}" = "true" ]; then
+  render_template "$DEPLOY_ROOT/templates/rosbridge-watcher.service.tpl" "$WORK_DIR/rendered/systemd/$WATCHER_SERVICE_NAME"
+  # watcher 脚本含 docker Go 模板 {{...}}，不走 render_template，直接复制
+  cp "$DEPLOY_ROOT/assets/rosbridge-watcher.sh" "$WORK_DIR/rendered/bin/rosbridge-watcher.sh"
+  chmod +x "$WORK_DIR/rendered/bin/rosbridge-watcher.sh"
+fi
 
 # 仅在使用 Discovery Server 的集群部署时才下发 ds 服务
 if [ "${DS_ENABLED:-false}" = "true" ]; then

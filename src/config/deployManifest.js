@@ -61,6 +61,7 @@ export function buildDeployManifest({ robot, runtimeProfile, effectiveConfig }) 
 
   const appDirName = 'radar-visualization'
   const rosbridgeServiceName = `${appDirName}-rosbridge.service`
+  const watcherServiceName = `${appDirName}-rosbridge-watcher.service`
   const dsServiceName = `${appDirName}-ds.service`
   const discoveryReport = runtimeProfile.discoveryReport || {}
   const recommendations = discoveryReport.recommendations || {}
@@ -135,7 +136,15 @@ export function buildDeployManifest({ robot, runtimeProfile, effectiveConfig }) 
       websocketPingTimeout: 30,
       unregisterTimeout: 2,
       maxMessageSize: 100000000,
-      startCommand: 'ros2 launch rosbridge_server rosbridge_websocket_launch.xml'
+      startCommand: 'ros2 launch rosbridge_server rosbridge_websocket_launch.xml',
+      // 监听 ROS 栈容器重启，自动重启 rosbridge 使其重连新 publisher
+      // （容器重启后旧订阅僵死，前端会收不到数据）
+      watcher: {
+        enabled: true,
+        containerName: 'i-ros',
+        settleSeconds: 10,
+        serviceName: watcherServiceName
+      }
     },
     ds: {
       enabled: usesDiscoveryServer,
