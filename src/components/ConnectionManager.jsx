@@ -43,6 +43,20 @@ function ConnectionManager() {
   const [deployFeedback, setDeployFeedback] = useState(null)
   const [deploymentProfileTouched, setDeploymentProfileTouched] = useState(false)
   const [deployDiscoveryInput, setDeployDiscoveryInput] = useState('')
+  // 本地伴随服务（deploy-agent）相关：在线探测、SSH 密码（用完即弃）、流式日志
+  const [agentOnline, setAgentOnline] = useState(null) // null=探测中, true/false
+  const [sshPassword, setSshPassword] = useState('')
+  const [deploying, setDeploying] = useState(false)
+  const [deployLog, setDeployLog] = useState('')
+
+  useEffect(() => {
+    let alive = true
+    fetch('/api/health')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (alive) setAgentOnline(Boolean(d?.ok)) })
+      .catch(() => { if (alive) setAgentOnline(false) })
+    return () => { alive = false }
+  }, [])
 
   useEffect(() => {
     if (selectedId) {
@@ -229,24 +243,159 @@ function ConnectionManager() {
     }
   }
 
-  const handleDeployToRobot = () => {
-    const status = {
-      action: 'deploy',
-      status: 'pending',
-      message: '已准备部署，请使用下方命令在本地执行部署。'
+  const handleDeployToRobot = async () => {
+    // helper 离线 → 回退到"导出 YAML + 终端执行"
+    if (agentOnline === false) {
+      const status = {
+        action: 'deploy',
+        status: 'error',
+        message: '本地部署服务(deploy-agent)未运行：请用 start-product.sh 启动它，或导出 YAML 后在终端执行 deploy/scripts/deploy.sh。',
+        updatedAt: Date.now()
+      }
+      setDeployFeedback(status)
+      setDeployStatus(draftRobotId, status)
+      return
     }
-    setDeployFeedback(status)
-    setDeployStatus(draftRobotId, status)
+    if (!sshPassword) {
+      setDeployFeedback({ action: 'deploy', status: 'error', message: '请先输入机器人 SSH 密码。', updatedAt: Date.now() })
+      return
+    }
+
+    // 取已生成的清单；未生成则即时构建一份
+    let yaml = deployArtifact?.yaml
+    if (!yaml) {
+      try {
+        yaml = buildDeployManifestYaml({
+          robot: resolvedDraft.robot,
+          runtimeProfile: deployRuntimeProfile,
+          effectiveConfig: resolvedDraft.effectiveConfig
+        })
+      } catch (error) {
+        setDeployFeedback({ action: 'deploy', status: 'error', message: '生成部署清单失败：' + (error.message || ''), updatedAt: Date.now() })
+        return
+      }
+    }
+
+    setDeploying(true)
+    setDeployLog('')
+    setDeployFeedback({ action: 'deploy', status: 'pending', message: `正在部署到 ${resolvedDraft.robot.host} …`, updatedAt: Date.now() })
+
+    try {
+      const resp = await fetch('/api/deploy', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ manifestYaml: yaml, sshPassword })
+      })
+      // 流式读取部署日志
+      let buf = ''
+      if (resp.body && resp.body.getReader) {
+        const reader = resp.body.getReader()
+        const decoder = new TextDecoder()
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          setDeployLog(buf)
+        }
+      } else {
+        buf = await resp.text()
+        setDeployLog(buf)
+      }
+      const ok = buf.includes('__DEPLOY_RESULT__ OK')
+      const status = {
+        action: 'deploy',
+        status: ok ? 'success' : 'error',
+        message: ok ? `部署成功，rosbridge 已在 ${resolvedDraft.robot.host} 重启。` : '部署失败，请查看下方日志。',
+        updatedAt: Date.now()
+      }
+      setDeployFeedback(status)
+      setDeployStatus(draftRobotId, status)
+    } catch (error) {
+      setDeployFeedback({ action: 'deploy', status: 'error', message: '部署请求失败：' + (error.message || ''), updatedAt: Date.now() })
+    } finally {
+      setDeploying(false)
+      setSshPassword('') // 密码用完即弃
+    }
   }
 
-  const handleRestartRobotServices = () => {
-    const status = {
-      action: 'restart',
-      status: 'pending',
-      message: '重启动作需要在部署后通过 deploy 脚本或机器人侧 systemctl 执行。'
+  const handleRestartRobotServices = async () => {
+    if (agentOnline === false) {
+      const status = {
+        action: 'restart',
+        status: 'error',
+        message: '本地部署服务(deploy-agent)未运行，无法从 web 下发重启。',
+        updatedAt: Date.now()
+      }
+      setDeployFeedback(status)
+      setDeployStatus(draftRobotId, status)
+      return
     }
-    setDeployFeedback(status)
-    setDeployStatus(draftRobotId, status)
+    if (!sshPassword) {
+      setDeployFeedback({ action: 'restart', status: 'error', message: '请先输入机器人 SSH 密码。', updatedAt: Date.now() })
+      return
+    }
+
+    // rosbridge 服务名取自清单；未生成清单时即时构建一份以拿到服务名
+    let serviceName = deployArtifact?.manifest?.rosbridge?.serviceName
+    if (!serviceName) {
+      try {
+        const manifest = buildDeployManifest({
+          robot: resolvedDraft.robot,
+          runtimeProfile: deployRuntimeProfile,
+          effectiveConfig: resolvedDraft.effectiveConfig
+        })
+        serviceName = manifest.rosbridge.serviceName
+      } catch (error) {
+        setDeployFeedback({ action: 'restart', status: 'error', message: '无法确定 rosbridge 服务名：' + (error.message || ''), updatedAt: Date.now() })
+        return
+      }
+    }
+
+    setDeploying(true)
+    setDeployLog('')
+    setDeployFeedback({ action: 'restart', status: 'pending', message: `正在重启 ${serviceName} …`, updatedAt: Date.now() })
+
+    try {
+      const resp = await fetch('/api/restart', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          host: resolvedDraft.robot.host,
+          user: resolvedDraft.robot.user || 'wl',
+          sshPort: resolvedDraft.robot.sshPort || 22,
+          serviceName,
+          sshPassword
+        })
+      })
+      let buf = ''
+      if (resp.body && resp.body.getReader) {
+        const reader = resp.body.getReader()
+        const decoder = new TextDecoder()
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          setDeployLog(buf)
+        }
+      } else {
+        buf = await resp.text()
+        setDeployLog(buf)
+      }
+      const ok = buf.includes('__RESTART_RESULT__ OK')
+      const status = {
+        action: 'restart',
+        status: ok ? 'success' : 'error',
+        message: ok ? `${serviceName} 已重启。` : '重启失败，请查看下方日志。',
+        updatedAt: Date.now()
+      }
+      setDeployFeedback(status)
+      setDeployStatus(draftRobotId, status)
+    } catch (error) {
+      setDeployFeedback({ action: 'restart', status: 'error', message: '重启请求失败：' + (error.message || ''), updatedAt: Date.now() })
+    } finally {
+      setDeploying(false)
+      setSshPassword('')
+    }
   }
 
   const handleExportManifest = () => {
@@ -392,7 +541,27 @@ function ConnectionManager() {
             </div>
 
             <div style={deployPanelStyle}>
-              <div style={deployTitleStyle}>部署操作区</div>
+              <div style={deployTitleStyle}>
+                部署操作区
+                <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 400, color: agentOnline ? '#22c55e' : agentOnline === false ? '#f59e0b' : '#888' }}>
+                  {agentOnline === null ? '· 探测本地服务…' : agentOnline ? '· 本地部署服务在线' : '· 本地部署服务离线（仅可导出命令）'}
+                </span>
+              </div>
+              {agentOnline && (
+                <div style={{ marginBottom: 10 }}>
+                  <label style={{ display: 'block', fontSize: 11, color: '#aaa', marginBottom: 4 }}>
+                    机器人 SSH 密码（用于一键部署，用完即弃，不保存）
+                  </label>
+                  <input
+                    type="password"
+                    value={sshPassword}
+                    onChange={(e) => setSshPassword(e.target.value)}
+                    placeholder={`SSH 密码 (${resolvedDraft.robot.user || 'wl'}@${resolvedDraft.robot.host || '机器人'})`}
+                    style={{ ...inputStyle, width: '100%' }}
+                    autoComplete="new-password"
+                  />
+                </div>
+              )}
               <div style={deployButtonGridStyle}>
                 <button
                   type="button"
@@ -415,13 +584,31 @@ function ConnectionManager() {
                 >
                   生成部署清单
                 </button>
-                <button type="button" onClick={handleDeployToRobot} style={deployActionButtonStyle}>
-                  部署到机器人
+                <button
+                  type="button"
+                  onClick={handleDeployToRobot}
+                  style={{
+                    ...deployActionButtonStyle,
+                    ...(agentOnline ? { background: '#2563eb', borderColor: '#3b82f6', color: '#fff' } : {}),
+                    opacity: deploying ? 0.6 : 1,
+                    cursor: deploying ? 'not-allowed' : 'pointer'
+                  }}
+                  disabled={deploying}
+                >
+                  {deploying ? '部署中…' : agentOnline ? '一键部署到机器人' : '部署到机器人'}
                 </button>
-                <button type="button" onClick={handleRestartRobotServices} style={deployActionButtonStyle}>
-                  重启机器人服务
+                <button
+                  type="button"
+                  onClick={handleRestartRobotServices}
+                  style={{ ...deployActionButtonStyle, opacity: deploying ? 0.6 : 1, cursor: deploying ? 'not-allowed' : 'pointer' }}
+                  disabled={deploying}
+                >
+                  {deploying ? '执行中…' : '重启 rosbridge 服务'}
                 </button>
               </div>
+              {deployLog && (
+                <pre style={deployLogStyle}>{deployLog}</pre>
+              )}
               <div style={deployResultBoxStyle}>
                 <div style={deployResultLabelStyle}>识别状态：<span style={{ color: detectionColor }}>{detectionState}</span></div>
                 <div style={deployResultLabelStyle}>当前 deploy 目标：<code>{resolvedDraft.robot.name}@{resolvedDraft.robot.host || '未填写 IP'}</code></div>
@@ -435,6 +622,17 @@ function ConnectionManager() {
                   </div>
                 )}
               </div>
+              {deployArtifact?.yaml && (
+                <div style={manifestReadyStyle}>
+                  <div style={{ color: '#22c55e', fontSize: 12, fontWeight: 600 }}>
+                    ✓ 部署清单已生成：{deployArtifact.manifest?.host} · domain {deployArtifact.manifest?.env?.ROS_DOMAIN_ID}
+                    {deployArtifact.manifest?.fastdds?.enabled ? ' · UDPv4(按IP域)' : (deployArtifact.manifest?.env?.ROS_DISCOVERY_SERVER ? ' · Discovery Server' : '')}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 4 }}>
+                    下一步：直接点上方“一键部署到机器人”。（其实不点“生成清单”也行，一键部署会自动生成）
+                  </div>
+                </div>
+              )}
             </div>
 
             {(connecting || errorMessage) && (
@@ -765,6 +963,27 @@ const deployActionButtonStyle = {
   borderRadius: 8,
   fontSize: 12,
   cursor: 'pointer'
+}
+const manifestReadyStyle = {
+  marginTop: 10,
+  padding: '8px 10px',
+  background: '#0f2a1a',
+  border: '1px solid rgba(34,197,94,0.35)',
+  borderRadius: 6
+}
+const deployLogStyle = {
+  marginTop: 10,
+  padding: 10,
+  background: '#0a0a0a',
+  border: '1px solid #1f2937',
+  borderRadius: 6,
+  color: '#9ca3af',
+  fontSize: 11,
+  fontFamily: 'monospace',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-all',
+  maxHeight: 220,
+  overflowY: 'auto'
 }
 const deployResultBoxStyle = {
   marginTop: 12,

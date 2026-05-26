@@ -51,8 +51,8 @@ if [ -n "$PIDS" ]; then
   sleep 1
 fi
 
-echo "[5/5] 启动本地产品服务..."
-nohup python3 -m http.server ${PORT} --directory dist >"$LOG_FILE" 2>&1 < /dev/null &
+echo "[5/5] 启动本地产品服务 (deploy-agent: 静态托管 + 一键部署 API)..."
+PORT="${PORT}" HOST=127.0.0.1 nohup node tools/deploy-agent/server.mjs >"$LOG_FILE" 2>&1 < /dev/null &
 SERVER_PID=$!
 echo "$SERVER_PID" > "$PID_FILE"
 sleep 2

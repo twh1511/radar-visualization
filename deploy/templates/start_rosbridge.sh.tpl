@@ -23,4 +23,12 @@ fi
 
 export ROS_SUPER_CLIENT="${ROS_SUPER_CLIENT:-TRUE}"
 
-exec ros2 launch {{ROSBRIDGE_PACKAGE}} {{ROSBRIDGE_ENTRY}}
+# websocket_ping_interval>0 开启心跳，主动回收死连接（CLOSE-WAIT）与僵尸订阅；
+# unregister_timeout 缩短，减少刷新/重连时的订阅叠加。
+exec ros2 launch {{ROSBRIDGE_PACKAGE}} {{ROSBRIDGE_ENTRY}} \
+  port:={{ROSBRIDGE_PORT}} \
+  address:={{ROSBRIDGE_ADDRESS}} \
+  websocket_ping_interval:={{ROSBRIDGE_PING_INTERVAL}} \
+  websocket_ping_timeout:={{ROSBRIDGE_PING_TIMEOUT}} \
+  unregister_timeout:={{ROSBRIDGE_UNREGISTER_TIMEOUT}} \
+  max_message_size:={{ROSBRIDGE_MAX_MESSAGE_SIZE}}

@@ -25,9 +25,11 @@ export const ROBOT_PRESETS = [
   },
   {
     id: 'iiri-hdl-cluster',
-    name: 'IIRI 集群机器人',
-    deploymentProfileId: 'iiri-cluster-hdl',
-    description: '针对 IIRI 集群 HDL 实机导航链路的预设。',
+    name: 'IIRI 实机 i-ros',
+    // i-ros 实机走"按 IP 推导域 + UDPv4"发现（generic-rosbridge 档案），
+    // 不是老 247 集群的 Discovery Server(219)。若要连 DS 集群，在设置里手动选 iiri-cluster-hdl 档案。
+    deploymentProfileId: 'generic-rosbridge',
+    description: '针对 i-ros 实机导航链路（按 IP 域 + UDPv4），含 HDL 定位与代价地图。',
     defaults: {
       topics: {
         // FAST-LIO 的 /cloud_registered 在实机默认被 scan_publish_en:false 关闭，

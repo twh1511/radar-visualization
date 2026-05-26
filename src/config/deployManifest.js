@@ -129,6 +129,12 @@ export function buildDeployManifest({ robot, runtimeProfile, effectiveConfig }) 
       port: robot.port || 9090,
       address: '0.0.0.0',
       serviceName: rosbridgeServiceName,
+      // WebSocket 心跳：定期 ping 客户端，超时无 pong 即主动断开，
+      // 回收 CLOSE-WAIT 死连接与僵尸订阅；unregister 缩短到 2s 减少刷新时的订阅叠加。
+      websocketPingInterval: 10,
+      websocketPingTimeout: 30,
+      unregisterTimeout: 2,
+      maxMessageSize: 100000000,
       startCommand: 'ros2 launch rosbridge_server rosbridge_websocket_launch.xml'
     },
     ds: {
