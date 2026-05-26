@@ -8,6 +8,7 @@ import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { transformPoseToTarget } from '../utils/transforms'
 
 const URDF_URL = '/robot_model/urdf/mz05_20260322.urdf'
+const MODEL_SCALE = 0.5  // 模型整体缩放
 
 // 加载真实 URDF 模型（mz05 四足）。STL 无颜色，统一上金属质感材质。
 function useUrdfRobot() {
@@ -102,8 +103,9 @@ function RobotPose() {
   return (
     <group ref={groupRef}>
       {robot ? (
-        // offsetY 把脚抬到地面(y=0)；内层绕 X 轴 -90° 把 URDF(z上) 转到场景(y上)
-        <group position={[0, offsetY, 0]}>
+        // 缩放后脚的抬升量同步缩放(offsetY*scale)，保证脚仍踩在 y=0；
+        // 内层绕 X 轴 -90° 把 URDF(z上) 转到场景(y上)
+        <group scale={MODEL_SCALE} position={[0, offsetY * MODEL_SCALE, 0]}>
           <group rotation={[-Math.PI / 2, 0, 0]}>
             <primitive object={robot} />
           </group>
