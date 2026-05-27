@@ -127,6 +127,7 @@ function createDiscoveryOverride(candidates, topicTypes = {}) {
 
 export const useRosStore = create((set, get) => ({
   ros: null,
+  rosCloud: null,
   connected: false,
   connecting: false,
   connectionStatus: '未连接',
@@ -196,6 +197,8 @@ export const useRosStore = create((set, get) => ({
   }),
 
   _subscribers: [],
+  _cloudSubs: [],
+  _cloudReconnectTimer: null,
   _mapFetchTimer: null,
   _navigationActionClient: null,
   _navigationGoalHandle: null,
@@ -297,6 +300,8 @@ export const useRosStore = create((set, get) => ({
       navigationGoal: null,
       _navigationActionClient: null,
       _navigationGoalHandle: null,
+      rosCloud: null,
+      _cloudReconnectTimer: null,
       diagnostics: {
         bridgeMode: runtimeProfile.network.bridgeMode || 'rosbridge',
         environment: runtimeProfile.environment,
@@ -313,15 +318,36 @@ export const useRosStore = create((set, get) => ({
 
     const ros = new ROSLIB.Ros({ url })
 
+    // 点云走独立的第二个 WebSocket 连接。点云是 5.7MB/s 大流量，会把所在连接的 TCP
+    // 发送队列撑爆 → ping 超时 → 断连。把它与导航/位姿/地图(小流量)隔离到不同连接后，
+    // 导航连接(ros)永不积压、永不断；点云连接(rosCloud)卡/断只影响点云本身，独立自动重连。
+    const startCloud = () => {
+      if (get().ros !== ros || !get().connected) return
+      try { get().rosCloud?.close?.() } catch (e) {}
+      const rosCloud = new ROSLIB.Ros({ url })
+      rosCloud.on('connection', () => {
+        if (get().rosCloud !== rosCloud) return
+        get().subscribeCloud(rosCloud)
+      })
+      rosCloud.on('close', () => {
+        if (get().rosCloud !== rosCloud) return
+        // 点云连接断了（多半是带宽打满）：导航连接不受影响。3s 后独立重连点云。
+        if (get()._cloudReconnectTimer) clearTimeout(get()._cloudReconnectTimer)
+        const t = setTimeout(() => startCloud(), 3000)
+        set({ _cloudReconnectTimer: t })
+      })
+      rosCloud.on('error', () => {})  // 错误后会触发 close，统一在 close 里重连
+      set({ rosCloud })
+    }
+
     // 只有「当前活跃」连接的事件才允许改状态。重连时旧 ros 被 close()，其 close
     // 回调会异步触发；若不校验，它会把新连接的 connecting 重置为 false，导致
-    // App 的重连 effect 再次 connect()，循环新建 WebSocket → 服务端订阅/连接堆积
-    // （僵尸连接）→ rosbridge CPU 被多份点云序列化打满 → ping 超时全断 → 再堆。
+    // App 的重连 effect 再次 connect()，循环新建 WebSocket → 服务端订阅/连接堆积。
     ros.on('connection', () => {
       if (get().ros !== ros) return
       set({ connected: true, connecting: false, connectionStatus: '已连接', errorMessage: '' })
       get().autoDiscoverResources()
-      setTimeout(() => { if (get().ros === ros) get().subscribeTopics() }, 150)
+      setTimeout(() => { if (get().ros === ros) { get().subscribeTopics(); startCloud() } }, 150)
     })
 
     ros.on('error', (error) => {
@@ -331,26 +357,37 @@ export const useRosStore = create((set, get) => ({
 
     ros.on('close', () => {
       if (get().ros !== ros) return
-      set({ connected: false, connecting: false, connectionStatus: '连接已断开' })
+      // 主连接断开：连同点云连接一起清理（避免悬挂的点云重连）
+      if (get()._cloudReconnectTimer) clearTimeout(get()._cloudReconnectTimer)
+      try { get().rosCloud?.close?.() } catch (e) {}
+      set({ connected: false, connecting: false, connectionStatus: '连接已断开', rosCloud: null, _cloudReconnectTimer: null })
     })
 
     set({ ros })
   },
 
   disconnect: () => {
-    const { ros, _subscribers, _mapFetchTimer, _navigationGoalHandle } = get()
+    const { ros, rosCloud, _subscribers, _cloudSubs, _mapFetchTimer, _cloudReconnectTimer, _navigationGoalHandle } = get()
     if (_mapFetchTimer) clearTimeout(_mapFetchTimer)
+    if (_cloudReconnectTimer) clearTimeout(_cloudReconnectTimer)
     if (_navigationGoalHandle?.cancel) {
       try { _navigationGoalHandle.cancel() } catch (e) {}
     }
     _subscribers.forEach((sub) => {
       try { sub.unsubscribe() } catch (e) {}
     })
+    ;(_cloudSubs || []).forEach((s) => { try { s.unsubscribe?.() } catch (e) {} })
     if (ros) {
       try { ros.close() } catch (e) {}
     }
+    if (rosCloud) {
+      try { rosCloud.close() } catch (e) {}
+    }
     set({
       ros: null,
+      rosCloud: null,
+      _cloudSubs: [],
+      _cloudReconnectTimer: null,
       connected: false,
       connecting: false,
       connectionStatus: '未连接',
@@ -420,26 +457,8 @@ export const useRosStore = create((set, get) => ({
     })
     newSubs.push(tfSub)
 
-    const pcSub = new ROSLIB.Topic({ ros, name: topics.pointCloud, messageType: topics.pointCloudType, throttle_rate: performance.pointCloudThrottle, queue_length: 1, compression: performance.pointCloudCompression || 'cbor' })
-    pcSub.subscribe((message) => {
-      recordMsg(topics.pointCloud)
-      try {
-        const rawPoints = parsePointCloud2(message, performance.downsample)
-        const frameId = message.header?.frame_id || null
-        if (rawPoints.length === 0) {
-          set({ pointCloudData: rawPoints, pointCloudFrame: frameId })
-          get().refreshDiagnostics()
-          return
-        }
-        const { tfTree, targetFrame } = get()
-        const points = applyTFToPointCloud(rawPoints, frameId, targetFrame, tfTree)
-        set({ pointCloudData: points, pointCloudFrame: frameId })
-        get().refreshDiagnostics()
-      } catch (e) {
-        console.error('[PointCloud] 解析失败', e, message)
-      }
-    })
-    newSubs.push(pcSub)
+    // 点云不在此主连接订阅 —— 它走独立的 rosCloud 连接（见 subscribeCloud），
+    // 与导航/位姿/地图隔离，避免点云大流量把主连接的发送队列撑爆导致导航断连。
 
     const poseSub = new ROSLIB.Topic({ ros, name: topics.pose, messageType: topics.poseType, throttle_rate: performance.poseThrottle, queue_length: 1 })
     poseSub.subscribe((message) => {
@@ -515,23 +534,8 @@ export const useRosStore = create((set, get) => ({
     })
     newSubs.push(localizationHealthSub)
 
-    if (effectiveConfig.capabilities.supportsCostmap) {
-      const globalCostmapSub = new ROSLIB.Topic({ ros, name: topics.globalCostmap, messageType: topics.globalCostmapType, queue_length: 1 })
-      globalCostmapSub.subscribe((message) => {
-        recordMsg(topics.globalCostmap)
-        set({ globalCostmap: message, globalCostmapFrame: message.header?.frame_id || null })
-        get().refreshDiagnostics()
-      })
-      newSubs.push(globalCostmapSub)
-
-      const localCostmapSub = new ROSLIB.Topic({ ros, name: topics.localCostmap, messageType: topics.localCostmapType, queue_length: 1 })
-      localCostmapSub.subscribe((message) => {
-        recordMsg(topics.localCostmap)
-        set({ localCostmap: message, localCostmapFrame: message.header?.frame_id || null })
-        get().refreshDiagnostics()
-      })
-      newSubs.push(localCostmapSub)
-    }
+    // 注意：costmap(尤其 global costmap ~1.5MB/s 全量重发)是大流量，不放在此导航连接，
+    // 改到 rosCloud(见 subscribeCloud)，否则会堵塞导航连接让位姿等小数据断断续续。
 
     set({ _subscribers: newSubs, targetFrame: effectiveConfig.frames.targetFrame })
 
@@ -541,6 +545,59 @@ export const useRosStore = create((set, get) => ({
       get().refreshDiagnostics()
     }, 1200)
     set({ _mapFetchTimer: timer, mapStatus: '等待地图话题...' })
+  },
+
+  // 大流量话题(点云 + 全局/局部 costmap)统一在 rosCloud(第二连接)订阅，与导航数据隔离。
+  // 这条连接卡/断只影响这些大数据，导航连接(位姿/地图/路径)不受影响。
+  subscribeCloud: (rosCloud) => {
+    if (!rosCloud) return
+    const { effectiveConfig } = useAppStore.getState()
+    const { topics, performance } = effectiveConfig
+    const recordMsg = useAppStore.getState().recordTopicMessage
+    ;(get()._cloudSubs || []).forEach((s) => { try { s.unsubscribe?.() } catch (e) {} })
+    const cloudSubs = []
+
+    const pcSub = new ROSLIB.Topic({ ros: rosCloud, name: topics.pointCloud, messageType: topics.pointCloudType, throttle_rate: performance.pointCloudThrottle, queue_length: 1, compression: performance.pointCloudCompression || 'cbor' })
+    pcSub.subscribe((message) => {
+      recordMsg(topics.pointCloud)
+      try {
+        const rawPoints = parsePointCloud2(message, performance.downsample)
+        const frameId = message.header?.frame_id || null
+        if (rawPoints.length === 0) {
+          set({ pointCloudData: rawPoints, pointCloudFrame: frameId })
+          get().refreshDiagnostics()
+          return
+        }
+        const { tfTree, targetFrame } = get()
+        const points = applyTFToPointCloud(rawPoints, frameId, targetFrame, tfTree)
+        set({ pointCloudData: points, pointCloudFrame: frameId })
+        get().refreshDiagnostics()
+      } catch (e) {
+        console.error('[PointCloud] 解析失败', e, message)
+      }
+    })
+    cloudSubs.push(pcSub)
+
+    if (effectiveConfig.capabilities.supportsCostmap) {
+      // global costmap 是 ~1.5MB/帧全量栅格(nav2 always_send_full_costmap 1Hz)，限转发 0.5Hz
+      const globalCostmapSub = new ROSLIB.Topic({ ros: rosCloud, name: topics.globalCostmap, messageType: topics.globalCostmapType, queue_length: 1, throttle_rate: 2000 })
+      globalCostmapSub.subscribe((message) => {
+        recordMsg(topics.globalCostmap)
+        set({ globalCostmap: message, globalCostmapFrame: message.header?.frame_id || null })
+        get().refreshDiagnostics()
+      })
+      cloudSubs.push(globalCostmapSub)
+
+      const localCostmapSub = new ROSLIB.Topic({ ros: rosCloud, name: topics.localCostmap, messageType: topics.localCostmapType, queue_length: 1, throttle_rate: 1000 })
+      localCostmapSub.subscribe((message) => {
+        recordMsg(topics.localCostmap)
+        set({ localCostmap: message, localCostmapFrame: message.header?.frame_id || null })
+        get().refreshDiagnostics()
+      })
+      cloudSubs.push(localCostmapSub)
+    }
+
+    set({ _cloudSubs: cloudSubs })
   },
 
   handleMapMessage: (message, source = 'topic') => {
