@@ -48,7 +48,10 @@ export const DEFAULT_SETTINGS = {
     pointCloudThrottle: 100,
     poseThrottle: 50,
     pointSize: 0.05,
-    renderProfile: 'balanced'
+    renderProfile: 'balanced',
+    // 点云走 CBOR 二进制传输：rosbridge 端无需把巨大的字节数组做 JSON+base64
+    // 序列化（单线程，会把 CPU 打满进而导致 ping 超时断连）。'none' 退回 JSON。
+    pointCloudCompression: 'cbor'
   },
   display: {
     showGrid: true,

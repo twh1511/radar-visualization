@@ -313,17 +313,24 @@ export const useRosStore = create((set, get) => ({
 
     const ros = new ROSLIB.Ros({ url })
 
+    // 只有「当前活跃」连接的事件才允许改状态。重连时旧 ros 被 close()，其 close
+    // 回调会异步触发；若不校验，它会把新连接的 connecting 重置为 false，导致
+    // App 的重连 effect 再次 connect()，循环新建 WebSocket → 服务端订阅/连接堆积
+    // （僵尸连接）→ rosbridge CPU 被多份点云序列化打满 → ping 超时全断 → 再堆。
     ros.on('connection', () => {
+      if (get().ros !== ros) return
       set({ connected: true, connecting: false, connectionStatus: '已连接', errorMessage: '' })
       get().autoDiscoverResources()
-      setTimeout(() => get().subscribeTopics(), 150)
+      setTimeout(() => { if (get().ros === ros) get().subscribeTopics() }, 150)
     })
 
     ros.on('error', (error) => {
+      if (get().ros !== ros) return
       set({ connected: false, connecting: false, connectionStatus: '连接失败', errorMessage: error?.toString?.() || '未知错误' })
     })
 
     ros.on('close', () => {
+      if (get().ros !== ros) return
       set({ connected: false, connecting: false, connectionStatus: '连接已断开' })
     })
 
@@ -413,7 +420,7 @@ export const useRosStore = create((set, get) => ({
     })
     newSubs.push(tfSub)
 
-    const pcSub = new ROSLIB.Topic({ ros, name: topics.pointCloud, messageType: topics.pointCloudType, throttle_rate: performance.pointCloudThrottle, queue_length: 1 })
+    const pcSub = new ROSLIB.Topic({ ros, name: topics.pointCloud, messageType: topics.pointCloudType, throttle_rate: performance.pointCloudThrottle, queue_length: 1, compression: performance.pointCloudCompression || 'cbor' })
     pcSub.subscribe((message) => {
       recordMsg(topics.pointCloud)
       try {
