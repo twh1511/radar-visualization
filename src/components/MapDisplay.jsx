@@ -119,9 +119,12 @@ function MapDisplay() {
     if (!mapMesh) return
     event.stopPropagation()
     const point = event.point
+    // worldToLocal 把世界交点转回平面的局部坐标系(planeGeometry 在局部 XY 平面，法线为 Z)。
+    // 平面内坐标是 local.x / local.y；local.z 是法线方向(≈0)。之前误用 local.z 算 mapY，
+    // 导致 Y 恒为地图垂直中心、与点击竖直位置无关 —— 目标点位置错乱。
     const local = event.object.worldToLocal(point.clone())
     const mapX = local.x + mapMesh.width / 2
-    const mapY = local.z + mapMesh.height / 2
+    const mapY = local.y + mapMesh.height / 2
     const validity = classifyPoint(mapX, mapY)
 
     const goal = {
