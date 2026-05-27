@@ -8,7 +8,7 @@ import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { transformPoseToTarget } from '../utils/transforms'
 
 const URDF_URL = '/robot_model/urdf/mz05_20260322.urdf'
-const MODEL_SCALE = 0.5  // 模型整体缩放
+const MODEL_SCALE = 0.75  // 模型整体缩放
 
 // 加载真实 URDF 模型（mz05 四足）。STL 无颜色，统一上金属质感材质。
 function useUrdfRobot() {
@@ -26,7 +26,7 @@ function useUrdfRobot() {
           geometry.computeVertexNormals()
           const mesh = new THREE.Mesh(
             geometry,
-            new THREE.MeshStandardMaterial({ color: '#3a4a66', metalness: 0.55, roughness: 0.45 })
+            new THREE.MeshStandardMaterial({ color: '#2563eb', metalness: 0.2, roughness: 0.5 })
           )
           mesh.castShadow = true
           done(mesh)

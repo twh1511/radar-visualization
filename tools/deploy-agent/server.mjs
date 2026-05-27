@@ -19,7 +19,7 @@ const PROJECT_ROOT = join(__dirname, '..', '..')
 const DIST_DIR = join(PROJECT_ROOT, 'dist')
 const DEPLOY_SCRIPT = join(PROJECT_ROOT, 'deploy', 'scripts', 'deploy.sh')
 const PORT = Number(process.env.PORT || 3000)
-const HOST = process.env.HOST || '127.0.0.1'
+const HOST = process.env.HOST || '0.0.0.0'
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
