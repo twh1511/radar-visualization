@@ -670,7 +670,9 @@ export const useRosStore = create((set, get) => ({
     }
 
     const targetFrame = effectiveConfig.frames.targetFrame
-    const goal = goalPose || {
+    const actionName = effectiveConfig.actions.navigateToPose
+    // 优先用已选目标(地图点击)，否则机器人前方 1m
+    const goal = goalPose || get().navigationGoal || {
       target_pose: {
         header: { frame_id: targetFrame },
         pose: {
@@ -680,50 +682,62 @@ export const useRosStore = create((set, get) => ({
       }
     }
 
-    const actionClient = new ROSLIB.ActionClient({ ros, serverName: effectiveConfig.actions.navigateToPose, actionName: 'nav2_msgs/action/NavigateToPose' })
-    const goalHandle = new ROSLIB.Goal({ actionClient, goalMessage: goal })
+    // ⚠ ROS2 nav2 用的是 ROS2 action 协议。roslib 的 ActionClient 是 ROS1 actionlib(发到
+    // /navigate_to_pose/goal 话题)，ROS2 收不到 → 目标丢失、nav2 不规划。必须用 rosbridge
+    // 的 send_action_goal op 直接发。args 是 NavigateToPose 的 Goal: { pose, behavior_tree }。
+    const prev = get()._navigationGoalHandle
+    if (prev?.listener && ros.socket?.removeEventListener) {
+      try { ros.socket.removeEventListener('message', prev.listener) } catch (e) {}
+    }
+    const goalId = `nav_goal_${Date.now()}`
 
-    goalHandle.on('feedback', (feedback) => {
-      set({
-        navigationStatus: '导航中',
-        navigationTask: {
-          action: effectiveConfig.actions.navigateToPose,
-          message: `剩余距离：${feedback?.distance_remaining ?? '-'}，恢复次数：${feedback?.number_of_recoveries ?? 0}`,
-          feedback
-        }
-      })
+    // roslib 的 SocketAdapter 不分发 action_feedback/action_result，这里挂一个原始 socket
+    // 监听器解析它们(rosbridge 默认以 JSON 文本帧回传)，用于显示导航状态/诊断 abort。
+    const listener = (event) => {
+      if (typeof event.data !== 'string') return
+      let data
+      try { data = JSON.parse(event.data) } catch (e) { return }
+      if (!data || data.id !== goalId) return
+      if (data.op === 'action_feedback') {
+        const fb = data.values?.feedback || data.values || {}
+        set({ navigationStatus: '导航中', navigationTask: { action: actionName, message: `剩余距离: ${fb?.distance_remaining ?? '-'}，恢复: ${fb?.number_of_recoveries ?? 0}`, feedback: fb } })
+      } else if (data.op === 'action_result') {
+        const ok = data.result !== false
+        const res = data.values
+        set({ navigationStatus: ok ? '导航结束' : '导航失败/拒绝', navigationTask: { action: actionName, message: `结果: ${JSON.stringify(res?.result ?? res ?? data.status ?? '—')}`, result: data } })
+        try { ros.socket?.removeEventListener?.('message', listener) } catch (e) {}
+      }
+    }
+    try { ros.socket?.addEventListener?.('message', listener) } catch (e) {}
+
+    ros.callOnConnection({
+      op: 'send_action_goal',
+      id: goalId,
+      action: actionName,
+      action_type: 'nav2_msgs/action/NavigateToPose',
+      args: { pose: goal.target_pose, behavior_tree: '' },
+      feedback: true
     })
 
-    goalHandle.on('result', (result) => {
-      set({
-        navigationStatus: result?.result?.cancelled ? '导航已取消' : '导航完成',
-        navigationTask: {
-          action: effectiveConfig.actions.navigateToPose,
-          message: result?.result?.error_code ? `导航结束，错误码 ${result.result.error_code}` : '导航完成',
-          result
-        },
-        _navigationGoalHandle: null
-      })
-    })
-
-    goalHandle.send()
     set({
       navigationStatus: '导航请求已发送',
-      navigationTask: { action: effectiveConfig.actions.navigateToPose, message: `目标已发送到 ${targetFrame}`, goal },
+      navigationTask: { action: actionName, message: `目标已发送到 ${goal.target_pose?.header?.frame_id || targetFrame}（路径应显示在地图上）`, goal },
       navigationGoal: goal,
-      _navigationActionClient: actionClient,
-      _navigationGoalHandle: goalHandle
+      _navigationGoalHandle: { goalId, action: actionName, listener }
     })
   },
 
   cancelNavigationAction: () => {
-    const { _navigationGoalHandle } = get()
-    if (!_navigationGoalHandle?.cancel) {
+    const { ros, _navigationGoalHandle } = get()
+    if (!ros || !_navigationGoalHandle?.goalId) {
       set({ navigationStatus: '无可取消任务', navigationTask: { message: '当前没有进行中的导航任务' } })
       return
     }
-    _navigationGoalHandle.cancel()
-    set({ navigationStatus: '导航取消中...', navigationTask: { message: '已发送取消请求' } })
+    ros.callOnConnection({ op: 'cancel_action_goal', id: _navigationGoalHandle.goalId, action: _navigationGoalHandle.action })
+    if (_navigationGoalHandle.listener && ros.socket?.removeEventListener) {
+      try { ros.socket.removeEventListener('message', _navigationGoalHandle.listener) } catch (e) {}
+    }
+    set({ navigationStatus: '导航取消中...', navigationTask: { message: '已发送取消请求' }, _navigationGoalHandle: null })
   },
 
   callNavigationService: (serviceKey) => {
@@ -735,7 +749,8 @@ export const useRosStore = create((set, get) => ({
       return
     }
 
-    const serviceType = serviceKey === 'relocalize' ? 'std_srvs/srv/Trigger' : 'nav2_msgs/srv/ClearEntireCostmap'
+    // /relocalize 实测是 std_srvs/srv/Empty（不是 Trigger，类型不符会静默失败）
+    const serviceType = serviceKey === 'relocalize' ? 'std_srvs/srv/Empty' : 'nav2_msgs/srv/ClearEntireCostmap'
     const service = new ROSLIB.Service({ ros, name: serviceName, serviceType })
     set({ navigationStatus: `调用 ${serviceKey} 中...` })
 
