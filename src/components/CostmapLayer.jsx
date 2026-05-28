@@ -3,7 +3,11 @@ import * as THREE from 'three'
 import { useRosStore } from '../store/rosStore'
 import { transformPoseToTarget } from '../utils/transforms'
 
-function CostmapLayer({ data, frame, opacity = 0.35, occupiedColor = [239, 68, 68], freeColor = [20, 20, 20] }) {
+// 默认色提为模块常量：默认参数 [..] 每次调用都新建数组→引用变→useMemo 每帧失效重建纹理
+const DEFAULT_OCC_COLOR = [239, 68, 68]
+const DEFAULT_FREE_COLOR = [20, 20, 20]
+
+function CostmapLayer({ data, frame, opacity = 0.35, occupiedColor = DEFAULT_OCC_COLOR, freeColor = DEFAULT_FREE_COLOR }) {
   const targetFrame = useRosStore((s) => s.targetFrame)
   const tfTree = useRosStore((s) => s.tfTree)
 

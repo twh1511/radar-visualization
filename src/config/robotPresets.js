@@ -41,8 +41,9 @@ export const ROBOT_PRESETS = [
         localPlan: '/local_plan',
         localizationHealth: '/localization_health'
       },
-      // 该实机链路确实发布全局/局部代价地图，预设里直接开启订阅与显示，
-      // 避免依赖部署档案而漏订阅（订阅受 capabilities.supportsCostmap 门控）。
+      // costmap 开启显示。它们在云连接(rosCloud)上，global costmap ~1.5MB/帧大流量已限到
+      // 0.2Hz 转发(见 subscribeCloud)，配合 static map 持久化(重连不重载地图)，即使偶尔
+      // 因带宽抖动断开也不影响主体显示。
       capabilities: {
         supportsCostmap: true,
         supportsLocalizationHealth: true

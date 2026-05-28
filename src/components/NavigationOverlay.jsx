@@ -5,6 +5,12 @@ import PathLine from './PathLine'
 import CostmapLayer from './CostmapLayer'
 import { transformPointToTarget } from '../utils/transforms'
 
+// 模块级常量(稳定引用)：内联数组字面量会每次渲染产生新引用，使 CostmapLayer 的
+// useMemo([data,opacity,occupiedColor,freeColor]) 每帧失效→每帧重建整张 costmap 纹理，
+// 而本组件随 tfTree ~10Hz 重渲染 → 全局 costmap 不停闪烁。提为常量后只在 data 变时重建。
+const GLOBAL_COSTMAP_COLOR = [239, 68, 68]
+const LOCAL_COSTMAP_COLOR = [245, 158, 11]
+
 function NavigationOverlay() {
   const effectiveConfig = useAppStore((s) => s.effectiveConfig)
   const globalPlan = useRosStore((s) => s.globalPlan)
@@ -43,10 +49,10 @@ function NavigationOverlay() {
   return (
     <>
       {effectiveConfig.display.showGlobalCostmap && globalCostmap && (
-        <CostmapLayer data={globalCostmap} frame={globalCostmapFrame} opacity={0.18} occupiedColor={[239, 68, 68]} />
+        <CostmapLayer data={globalCostmap} frame={globalCostmapFrame} opacity={0.18} occupiedColor={GLOBAL_COSTMAP_COLOR} />
       )}
       {effectiveConfig.display.showLocalCostmap && localCostmap && (
-        <CostmapLayer data={localCostmap} frame={localCostmapFrame} opacity={0.28} occupiedColor={[245, 158, 11]} />
+        <CostmapLayer data={localCostmap} frame={localCostmapFrame} opacity={0.28} occupiedColor={LOCAL_COSTMAP_COLOR} />
       )}
       {effectiveConfig.display.showGlobalPlan && globalPlan?.poses?.length > 1 && (
         <PathLine message={globalPlan} color="#22c55e" lineWidth={3} />

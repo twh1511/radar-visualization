@@ -281,19 +281,27 @@ export const useRosStore = create((set, get) => ({
     const normalizedPath = path ? (path.startsWith('/') ? path : `/${path}`) : ''
     const url = `ws://${host}:${port}${normalizedPath}`
 
+    // static map 是恒定的：重连到同一机器人时保留已加载的地图，不清空、不重取，
+    // 避免每次(频繁)重连都把地图清掉→重新 GetMap→视觉上"一直在加载/闪"。
+    // 只有切换到不同机器人(host 变)或主动 disconnect 时才清。
+    const prev = get()
+    const keepMap = prev._connectedHost === host && !!prev.mapData
+
     set({
       connecting: true,
       connected: false,
       connectionStatus: `连接中 ${host}:${port}${normalizedPath}...`,
       errorMessage: '',
+      _connectedHost: host,
       tfTree: new Map(),
       targetFrame: useAppStore.getState().effectiveConfig.frames.targetFrame,
       pointCloudData: null,
       pointCloudFrame: null,
       robotPoseFrame: null,
-      mapData: null,
-      mapFrame: null,
-      mapStatus: '未加载',
+      mapData: keepMap ? prev.mapData : null,
+      mapFrame: keepMap ? prev.mapFrame : null,
+      _mapSig: keepMap ? prev._mapSig : null,
+      mapStatus: keepMap ? prev.mapStatus : '未加载',
       globalPlan: null,
       globalPlanFrame: null,
       localPlan: null,
@@ -621,16 +629,22 @@ export const useRosStore = create((set, get) => ({
     })
     cloudSubs.push(pcSub)
 
-    if (effectiveConfig.capabilities.supportsCostmap) {
-      // global costmap 是 ~1.5MB/帧全量栅格(nav2 always_send_full_costmap 1Hz)，限转发 0.5Hz
-      const globalCostmapSub = new ROSLIB.Topic({ ros: rosCloud, name: topics.globalCostmap, messageType: topics.globalCostmapType, queue_length: 1, throttle_rate: 2000 })
+    // ⚠ costmap 只在「确实要显示」时才订阅。它们是大流量(global costmap ~1.5MB/帧)，
+    // 不显示却订阅 = 白占满 WiFi → 连主连接 ping 都被冲断 → 整体每 10s 重连 → 地图一直重载。
+    const display = effectiveConfig.display || {}
+    if (effectiveConfig.capabilities.supportsCostmap && display.showGlobalCostmap) {
+      // global costmap 是 ~1.5MB/帧全量栅格(nav2 always_send_full_costmap)，基本是静态层+膨胀、
+      // 不用高频 → 限转发 0.2Hz(5s)，把它对 WiFi 的占用压到最低，避免饱和冲断连接。
+      const globalCostmapSub = new ROSLIB.Topic({ ros: rosCloud, name: topics.globalCostmap, messageType: topics.globalCostmapType, queue_length: 1, throttle_rate: 5000 })
       globalCostmapSub.subscribe((message) => {
         recordMsg(topics.globalCostmap)
         set({ globalCostmap: message, globalCostmapFrame: message.header?.frame_id || null })
         get().refreshDiagnostics()
       })
       cloudSubs.push(globalCostmapSub)
+    }
 
+    if (effectiveConfig.capabilities.supportsCostmap && display.showLocalCostmap) {
       const localCostmapSub = new ROSLIB.Topic({ ros: rosCloud, name: topics.localCostmap, messageType: topics.localCostmapType, queue_length: 1, throttle_rate: 1000 })
       localCostmapSub.subscribe((message) => {
         recordMsg(topics.localCostmap)
@@ -647,11 +661,19 @@ export const useRosStore = create((set, get) => ({
     if (!message?.info || !message?.data) return
     const { effectiveConfig, recordTopicMessage } = useAppStore.getState()
     recordTopicMessage(effectiveConfig.topics.map)
+    // 内容签名：map_server 常以 0.1Hz 反复重发同一张图，若每次都更新 mapData(新引用)，
+    // MapDisplay 的 useMemo 会重建整张地图纹理→视觉上不停"加载/闪烁"。同图则跳过更新。
+    const info = message.info
+    const d = message.data
+    const n = (d && d.length) || 0
+    const sig = `${info.width}x${info.height}|${info.origin?.position?.x},${info.origin?.position?.y}|${n}|${n ? `${d[0]},${d[(n / 2) | 0]},${d[n - 1]}` : ''}`
+    if (get().mapData && get()._mapSig === sig) return
     const frameId = message.header?.frame_id || null
     set((state) => ({
       mapData: message,
+      _mapSig: sig,
       mapFrame: frameId,
-      mapStatus: `已加载 ${message.info?.width || 0}x${message.info?.height || 0}`,
+      mapStatus: `已加载 ${info.width || 0}x${info.height || 0}`,
       diagnostics: evaluateTopicDiagnostics(useAppStore.getState().topicStats, effectiveConfig, {
         ...state.diagnostics,
         lastMapSource: source

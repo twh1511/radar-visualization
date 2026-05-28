@@ -59,9 +59,9 @@ export const DEPLOYMENT_PROFILES = [
       performance: {
         renderProfile: 'balanced',
         downsample: 5,
-        // 点云走独立连接(rosCloud)，但仍共享 WiFi 带宽 —— 限到 ~3.3Hz 降低链路压力，
-        // 给导航连接留带宽余量(导航连接小流量、不积压才不会 ping 超时断)。
-        pointCloudThrottle: 300,
+        // 点云走独立连接(rosCloud)，但仍共享 WiFi 带宽。3.3Hz(~1.9MB/s)接近 WiFi 上限会饱和，
+        // 连带把主连接 ping 冲断→整体每10s重连。限到 ~1.6Hz(~0.9MB/s)留足余量，连接才稳。
+        pointCloudThrottle: 600,
         poseThrottle: 50,
         pointSize: 0.05
       },
