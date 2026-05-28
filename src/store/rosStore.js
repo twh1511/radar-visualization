@@ -5,6 +5,10 @@ import { applyTFMessage, lookupTransform } from '../utils/transforms'
 import { getRobotPreset } from '../config/robotPresets'
 import * as THREE from 'three'
 
+// 点云大流量连接的页面可见性监听器(单例)：切后台/锁屏时暂停点云，
+// 避免灌爆服务端 rosbridge 发送缓冲(Python 不还内存→RSS 涨到 GB 级)。
+let _cloudVisibilityHandler = null
+
 function applyTFToPointCloud(rawPoints, sourceFrame, targetFrame, tfTree) {
   const count = rawPoints.length / 3
   const out = new Float32Array(count * 3)
@@ -267,6 +271,11 @@ export const useRosStore = create((set, get) => ({
     if (existing) {
       try { existing.close() } catch (e) {}
     }
+    // 移除上一次连接残留的可见性监听器，避免重连后多个监听器叠加。
+    if (_cloudVisibilityHandler && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', _cloudVisibilityHandler)
+      _cloudVisibilityHandler = null
+    }
 
     const runtimeProfile = useAppStore.getState().runtimeProfile
     const normalizedPath = path ? (path.startsWith('/') ? path : `/${path}`) : ''
@@ -302,6 +311,7 @@ export const useRosStore = create((set, get) => ({
       _navigationGoalHandle: null,
       rosCloud: null,
       _cloudReconnectTimer: null,
+      _cloudBackoff: 0,
       diagnostics: {
         bridgeMode: runtimeProfile.network.bridgeMode || 'rosbridge',
         environment: runtimeProfile.environment,
@@ -323,18 +333,28 @@ export const useRosStore = create((set, get) => ({
     // 导航连接(ros)永不积压、永不断；点云连接(rosCloud)卡/断只影响点云本身，独立自动重连。
     const startCloud = () => {
       if (get().ros !== ros || !get().connected) return
+      // 页面不可见(切后台/锁屏/最小化)时不开点云：否则 5.7MB/s 点云灌进不读的标签页，
+      // 撑爆服务端 rosbridge 发送缓冲(Python 不还内存→RSS 涨到 GB 级)。恢复可见后由 visibilitychange 拉起。
+      if (typeof document !== 'undefined' && document.hidden) return
       try { get().rosCloud?.close?.() } catch (e) {}
       const rosCloud = new ROSLIB.Ros({ url })
       rosCloud.on('connection', () => {
         if (get().rosCloud !== rosCloud) return
+        set({ _cloudBackoff: 0 })  // 连上即重置退避
         get().subscribeCloud(rosCloud)
       })
       rosCloud.on('close', () => {
         if (get().rosCloud !== rosCloud) return
-        // 点云连接断了（多半是带宽打满）：导航连接不受影响。3s 后独立重连点云。
         if (get()._cloudReconnectTimer) clearTimeout(get()._cloudReconnectTimer)
-        const t = setTimeout(() => startCloud(), 3000)
-        set({ _cloudReconnectTimer: t })
+        // 页面不可见时不重连，等恢复可见由 visibilitychange 拉起，避免对饱和 wifi 反复重灌。
+        if (typeof document !== 'undefined' && document.hidden) {
+          set({ rosCloud: null, _cloudReconnectTimer: null })
+          return
+        }
+        // 指数退避 3s→6s→…→30s 封顶：带宽打满时别每 3s 重连又灌满 5.7MB/s。
+        const delay = get()._cloudBackoff || 3000
+        const t = setTimeout(() => startCloud(), delay)
+        set({ _cloudReconnectTimer: t, _cloudBackoff: Math.min(delay * 2, 30000) })
       })
       rosCloud.on('error', () => {})  // 错误后会触发 close，统一在 close 里重连
       set({ rosCloud })
@@ -364,12 +384,35 @@ export const useRosStore = create((set, get) => ({
     })
 
     set({ ros })
+
+    // 页面可见性联动：隐藏→关掉点云大流量连接并退订；恢复→重新订阅。
+    // 这是根治"后台标签页/锁屏卡死消费者撑爆 rosbridge 内存"的核心开关。
+    if (typeof document !== 'undefined') {
+      if (_cloudVisibilityHandler) document.removeEventListener('visibilitychange', _cloudVisibilityHandler)
+      _cloudVisibilityHandler = () => {
+        if (get().ros !== ros) return
+        if (document.hidden) {
+          if (get()._cloudReconnectTimer) clearTimeout(get()._cloudReconnectTimer)
+          ;(get()._cloudSubs || []).forEach((s) => { try { s.unsubscribe?.() } catch (e) {} })
+          try { get().rosCloud?.close?.() } catch (e) {}
+          set({ rosCloud: null, _cloudSubs: [], _cloudReconnectTimer: null })
+        } else if (get().connected && !get().rosCloud) {
+          set({ _cloudBackoff: 0 })
+          startCloud()
+        }
+      }
+      document.addEventListener('visibilitychange', _cloudVisibilityHandler)
+    }
   },
 
   disconnect: () => {
     const { ros, rosCloud, _subscribers, _cloudSubs, _mapFetchTimer, _cloudReconnectTimer, _navigationGoalHandle } = get()
     if (_mapFetchTimer) clearTimeout(_mapFetchTimer)
     if (_cloudReconnectTimer) clearTimeout(_cloudReconnectTimer)
+    if (_cloudVisibilityHandler && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', _cloudVisibilityHandler)
+      _cloudVisibilityHandler = null
+    }
     if (_navigationGoalHandle?.cancel) {
       try { _navigationGoalHandle.cancel() } catch (e) {}
     }
